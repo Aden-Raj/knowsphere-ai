@@ -1,0 +1,20 @@
+[
+  {
+    "question": "What revenue growth does the report state?",
+    "answer_evidence": "Revenue grew by 15%.",
+    "expected_chunk_id": "eval_revenue",
+    "document_text": "The annual report states that revenue grew by 15 percent in fiscal year 2025 compared with the previous year."
+  },
+  {
+    "question": "How many locations does the company operate?",
+    "answer_evidence": "The company operates 42 locations.",
+    "expected_chunk_id": "eval_locations",
+    "document_text": "At year end, the company operated 42 retail locations across its regional markets."
+  },
+  {
+    "question": "What is the employee retention rate?",
+    "answer_evidence": "Employee retention was 91%.",
+    "expected_chunk_id": "eval_retention",
+    "document_text": "The human resources summary reports an employee retention rate of 91 percent for fiscal year 2025."
+  }
+]

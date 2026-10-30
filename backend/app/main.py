@@ -9,7 +9,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="Foundation API for the KnowSphere AI knowledge intelligence platform.",
+    description="KnowSphere AI document management and processing API.",
 )
 app.add_middleware(
     CORSMiddleware,
