@@ -1,0 +1,12 @@
+<section class="page">
+  <div class="page-heading"><div><p class="eyebrow">SAVED WORK</p><h1>Conversations</h1><p>Return to previous questions and their source references.</p></div><div class="heading-actions"><a class="button button-primary" routerLink="/chat"><app-icon name="plus" /> New conversation</a></div></div>
+  @if (error()) { <app-status-view kind="error" [message]="error()" actionLabel="Retry" (action)="load()" /> }
+  <section class="panel conversation-panel"><div class="panel-heading"><div><h2>Conversation history <span class="count">{{ loading() ? '…' : conversations().length }}</span></h2><p>Saved in your KnowSphere workspace.</p></div><button class="button button-quiet" type="button" (click)="load()" [disabled]="loading()"><app-icon name="refresh"/> Refresh</button></div>
+    @if (loading()) { <div class="panel-body"><app-status-view message="Loading conversation history…" /></div> }
+    @else if (!error() && conversations().length) { <div class="list">
+      @for (conversation of conversations(); track conversation.id) {
+        <article class="conversation-row"><a class="conversation-link" [routerLink]="['/chat', conversation.id]"><span class="conversation-icon"><app-icon name="chat" /></span><span class="conversation-main"><strong>{{ conversation.title }}</strong><small>{{ conversation.messages.length }} messages <span>·</span> Updated {{ conversation.updated_at | date:'medium' }}</small></span><app-icon class="open-arrow" name="arrow" /></a><button type="button" class="icon-button delete-button" (click)="delete(conversation)" [attr.aria-label]="'Delete conversation: ' + conversation.title" title="Delete conversation"><app-icon name="trash" /></button></article>
+      }
+    </div> } @else if (!error()) { <div class="empty-state"><span class="empty-mark"><app-icon name="history" /></span><strong>No saved conversations</strong><p>When you ask a question in AI chat, it will be saved here.</p><a class="button button-primary" routerLink="/chat"><app-icon name="chat" /> Start a conversation</a></div> }
+  </section>
+</section>

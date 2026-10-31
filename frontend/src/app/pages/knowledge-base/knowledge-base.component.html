@@ -1,0 +1,46 @@
+<section class="page">
+  <div class="page-heading">
+    <div><p class="eyebrow">YOUR SOURCES</p><h1>Knowledge base</h1><p>Upload and manage the documents behind your knowledge workspace.</p></div>
+    <div class="heading-actions"><button class="button button-primary" type="button" (click)="fileInput.click()"><app-icon name="upload" /> Upload documents</button></div>
+  </div>
+
+  @if (error()) { <app-status-view kind="error" [message]="error()" /> }
+  @if (notice()) { <div class="notice" role="status"><app-icon name="check" />{{ notice() }}</div> }
+
+  <section class="upload-panel panel" aria-label="Upload documents">
+    <div class="drop-zone" [class.drag-over]="dragOver()" (dragover)="$event.preventDefault(); dragOver.set(true)" (dragleave)="dragOver.set(false)" (drop)="onDrop($event)">
+      <div class="upload-mark"><app-icon name="upload" /></div>
+      <div class="drop-copy"><strong>Drop your documents here</strong><span>or <button type="button" class="text-link" (click)="fileInput.click()">browse files</button> from your computer</span><small>PDF, DOCX, TXT, Markdown · Multiple files supported</small></div>
+      <input #fileInput class="visually-hidden" type="file" multiple accept=".pdf,.docx,.txt,.md,.markdown" (change)="onFilePicker($event)" aria-label="Choose documents to upload" />
+    </div>
+    @if (selectedFiles().length) {
+      <div class="selection-list">
+        @for (file of selectedFiles(); track file.name + file.lastModified; let i = $index) {
+          <div class="selected-file"><app-icon name="file"/><span><strong>{{ file.name }}</strong><small>{{ formatBytes(file.size) }}</small></span><button class="icon-button" type="button" (click)="removeFile(i)" [attr.aria-label]="'Remove ' + file.name"><app-icon name="close" /></button></div>
+        }
+        <button class="button button-primary" type="button" (click)="upload()" [disabled]="uploading()"><app-icon name="upload" />{{ uploading() ? 'Uploading…' : 'Upload ' + selectedFiles().length + ' file(s)' }}</button>
+      </div>
+    }
+    @if (rejected().length) {
+      <div class="rejected-list" role="alert"><strong>Some files were not accepted</strong>@for (file of rejected(); track $index) { <p>{{ file.filename || 'Unnamed file' }} — {{ file.detail }}</p> }</div>
+    }
+  </section>
+
+  <section class="panel documents-panel">
+    <div class="panel-heading list-heading"><div><h2>All documents <span class="count">{{ loading() ? '…' : documents().length }}</span></h2><p>Track indexing, inspect metadata, or manage a source.</p></div><button type="button" class="button button-quiet" (click)="load()" [disabled]="loading()"><app-icon name="refresh" /> Refresh</button></div>
+    @if (loading()) { <div class="panel-body"><app-status-view message="Loading documents…" /></div> }
+    @else if (documents().length) {
+      <div class="table-scroll"><table><thead><tr><th>DOCUMENT</th><th>STATUS</th><th>CHUNKS</th><th>SIZE</th><th>ADDED</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+        @for (document of documents(); track document.id) {
+          <tr><td><a class="document-link" [routerLink]="['/knowledge-base', document.id]"><span class="file-icon"><app-icon name="file" /></span><span class="filename"><strong>{{ document.original_filename || document.title }}</strong><small>{{ document.file_extension?.toUpperCase() || 'DOCUMENT' }} <span>·</span> {{ document.mime_type || 'Type unavailable' }}</small></span></a></td>
+            <td><span class="status-badge" [class]="'status-badge ' + document.status"><i></i>{{ document.status }}</span>@if (document.error_message) { <small class="status-error" [title]="document.error_message">Processing error</small> }</td>
+            <td class="number-cell">{{ document.chunk_count }}</td><td>{{ formatBytes(document.file_size_bytes) }}</td><td class="date-cell">{{ document.created_at | date:'MMM d, y' }}</td>
+            <td><div class="row-actions"><a class="icon-button" [routerLink]="['/knowledge-base', document.id]" [attr.aria-label]="'View details for ' + (document.original_filename || document.title)" title="View details"><app-icon name="external" /></a><button class="icon-button" type="button" (click)="reindex(document)" [disabled]="reindexingIds().has(document.id)" [attr.aria-label]="'Reindex ' + (document.original_filename || document.title)" title="Reindex"><app-icon name="refresh" /></button><button class="icon-button danger-action" type="button" (click)="delete(document)" [disabled]="document.status === 'processing'" [attr.aria-label]="'Delete ' + (document.original_filename || document.title)" title="Delete"><app-icon name="trash" /></button></div></td>
+          </tr>
+        }
+      </tbody></table></div>
+    } @else if (!error()) {
+      <div class="empty-state"><span class="empty-mark"><app-icon name="files" /></span><strong>Your knowledge base is empty</strong><p>Upload a document to begin extracting and indexing its content.</p><button class="button button-primary" type="button" (click)="fileInput.click()"><app-icon name="upload" /> Choose documents</button></div>
+    }
+  </section>
+</section>

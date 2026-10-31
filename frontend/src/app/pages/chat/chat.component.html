@@ -1,0 +1,49 @@
+<section class="chat-page">
+  <aside class="chat-history panel" aria-label="Conversation list">
+    <div class="history-header"><div><p class="eyebrow">KNOWSPHERE AI</p><h1>Ask your knowledge</h1></div><button type="button" class="icon-button new-chat" (click)="startNewConversation()" aria-label="Start a new conversation" title="New conversation"><app-icon name="plus" /></button></div>
+    <button type="button" class="button button-primary new-chat-button" (click)="startNewConversation()"><app-icon name="plus" /> New conversation</button>
+    @if (conversationError()) { <p class="history-error">{{ conversationError() }}</p> }
+    <div class="history-list">
+      <span class="history-label">RECENT</span>
+      @if (!conversations().length && !conversationError()) { <p class="history-empty">Your saved conversations will appear here.</p> }
+      @for (conversation of conversations(); track conversation.id) {
+        <button type="button" class="history-item" [class.active]="currentConversationId() === conversation.id" (click)="router.navigate(['/chat', conversation.id])" [attr.aria-current]="currentConversationId() === conversation.id ? 'page' : null">
+          <app-icon name="chat" /><span><strong>{{ conversation.title }}</strong><small>{{ conversation.updated_at | date:'MMM d, y' }}</small></span>
+        </button>
+      }
+    </div>
+    <button type="button" class="history-bottom" (click)="router.navigate(['/conversations'])"><app-icon name="history" /> All conversations <app-icon name="arrow" /></button>
+  </aside>
+
+  <div class="chat-workspace">
+    <header class="chat-header"><div><span class="live-dot"></span><span>{{ currentConversationId() ? 'Saved conversation' : 'New conversation' }}</span></div><details class="document-filter"><summary><app-icon name="files" /><span>{{ selectedDocumentIds().length ? selectedDocumentIds().length + ' sources' : 'All sources' }}</span></summary><fieldset><legend>Search within</legend><label><input type="checkbox" [checked]="selectedDocumentIds().length === 0" (change)="selectedDocumentIds.set([])" /> All completed documents</label>@for (document of documents(); track document.id) { <label><input type="checkbox" [checked]="isDocumentSelected(document.id)" (change)="toggleDocument(document.id, $any($event.target).checked)" /> {{ document.filename }}</label> }@if (!documents().length) { <small>No completed documents available.</small> }</fieldset></details></header>
+    <div #messagesViewport class="messages" aria-live="polite" (scroll)="onMessagesScroll()">
+      @if (!messages().length && !loadingHistory()) {
+        <div class="welcome-state"><span class="welcome-spark"><app-icon name="spark" /></span><p class="eyebrow">GROUNDED IN YOUR SOURCES</p><h2>What would you like to know?</h2><p>Ask a question about documents in your knowledge base. Answers include references to the source material.</p><div class="suggestion-row"><span>Try asking</span><button type="button" (click)="draft.set('Summarize the key findings in my documents.')">Summarize key findings</button><button type="button" (click)="draft.set('What evidence do my documents contain about the main risks?')">Find supporting evidence</button></div></div>
+      }
+      @if (loadingHistory()) { <div class="loading-history"><span class="spinner"></span>Loading conversation…</div> }
+      @if (error()) { <app-status-view kind="error" [message]="error()" /> }
+      @for (message of messages(); track message.id) {
+        <article class="message" [class.user-message]="message.role === 'user'" [class.assistant-message]="message.role === 'assistant'">
+          <div class="message-avatar">@if (message.role === 'assistant') { <app-icon name="spark" /> } @else { <span>YOU</span> }</div>
+          <div class="message-content">
+            <div class="message-meta"><strong>{{ message.role === 'assistant' ? 'KnowSphere AI' : 'You' }}</strong><time>{{ message.createdAt | date:'shortTime' }}</time></div>
+            @if (message.content) { <div class="answer-text">{{ message.content }}</div> }
+            @else if (message.role === 'assistant') {
+              <div class="generation-notice" [class.warn]="message.generationStatus !== 'no_evidence'"><app-icon [name]="message.generationStatus === 'no_evidence' ? 'search' : 'alert'"/><div><strong>{{ statusTitle(message.generationStatus) }}</strong><p>{{ statusText(message.generationStatus) }}</p></div></div>
+            }
+            @if (message.citations.length) { <app-citation-list [citations]="message.citations" /> }
+            @if (message.evidence.length) {
+              <details class="evidence"><summary><app-icon name="files" /> Retrieved evidence <span>{{ message.evidence.length }} chunks</span></summary>
+                <div class="evidence-list">@for (chunk of message.evidence; track chunk.chunk_id) { <article class="evidence-chunk"><div class="evidence-meta"><strong>{{ chunk.filename }}</strong><span>Chunk {{ chunk.chunk_index }} · {{ (chunk.relevance_score * 100) | number:'1.0-0' }}% match</span>@if (chunk.page_number !== null) { <span>Page {{ chunk.page_number }}</span> }</div><p>{{ chunk.text }}</p><small>{{ chunk.chunk_id }}</small></article> }</div>
+              </details>
+            }
+          </div>
+        </article>
+      }
+      @if (sending()) { <div class="thinking"><span class="message-avatar ai-avatar"><app-icon name="spark" /></span><span class="thinking-dots"><i></i><i></i><i></i></span><span>Searching sources…</span></div> }
+      <div class="messages-end" aria-hidden="true"></div>
+    </div>
+    <footer class="composer-area"><div class="composer"><textarea #messageInput [ngModel]="draft()" (ngModelChange)="draft.set($event)" (keydown)="onComposerKeydown($event)" rows="1" placeholder="Ask a question about your knowledge…" aria-label="Your question" [disabled]="sending()" maxlength="12000"></textarea><div class="composer-actions"><span>Enter to send <kbd>↵</kbd> <span class="key-separator">·</span> Shift+Enter for a new line</span><button type="button" class="send-button" (click)="send()" [disabled]="sending() || !draft().trim()" aria-label="Send question"><app-icon name="arrow" /></button></div></div><p class="composer-footnote">Responses are grounded in retrieved documents. Always review citations against the source.</p></footer>
+  </div>
+</section>

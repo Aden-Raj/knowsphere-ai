@@ -1,56 +1,9 @@
-<div class="app-shell">
-  <aside class="sidebar">
-    <a class="brand" href="/" aria-label="KnowSphere AI home">
-      <span class="brand-mark">K</span>
-      <span class="brand-name">knowsphere<span>AI</span></span>
-    </a>
-
-    <div class="workspace-label">WORKSPACE</div>
-    <nav aria-label="Main navigation">
-      <a class="nav-item active" href="/" aria-current="page">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/></svg>
-        Overview
-      </a>
-      <span class="nav-item disabled" aria-disabled="true"><span class="nav-icon">▤</span>Knowledge base <span class="soon">Soon</span></span>
-      <span class="nav-item disabled" aria-disabled="true"><span class="nav-icon">⌕</span>Ask knowledge <span class="soon">Soon</span></span>
-    </nav>
-
-    <div class="sidebar-bottom">
-      <div class="sidebar-rule"></div>
-      <span class="nav-item disabled" aria-disabled="true"><span class="nav-icon">⚙</span>Settings</span>
-      <div class="user-card"><div class="avatar">KS</div><div><strong>Workspace admin</strong><small>Local workspace</small></div><span class="dots">•••</span></div>
-    </div>
-  </aside>
-
-  <main class="main-content">
-    <header class="topbar">
-      <div class="breadcrumbs"><span>Workspace</span><b>/</b><strong>Overview</strong></div>
-      <div class="topbar-right"><span class="environment"><i></i>Development</span><button class="help-button" type="button" aria-label="Help">?</button></div>
-    </header>
-
-    <section class="page-content">
-      <div class="welcome-row">
-        <div><p class="eyebrow">YOUR KNOWLEDGE, CONNECTED</p><h1>Knowledge overview</h1><p class="intro">A clear view of the knowledge your team can explore.</p></div>
-        <button class="primary-button" type="button" disabled title="Document ingestion arrives in a later milestone"><span>＋</span> Add knowledge</button>
-      </div>
-
-      <div class="stat-grid" aria-label="Knowledge statistics">
-        <article class="stat-card"><div class="stat-heading">Sources <span class="stat-icon lilac">▤</span></div><div class="stat-value">—</div><div class="stat-caption">Connect a source to get started</div></article>
-        <article class="stat-card"><div class="stat-heading">Documents <span class="stat-icon blue">▧</span></div><div class="stat-value">—</div><div class="stat-caption">Documents will appear here</div></article>
-        <article class="stat-card"><div class="stat-heading">Knowledge coverage <span class="stat-icon green">◉</span></div><div class="stat-value">—</div><div class="stat-caption">Coverage begins with your first source</div></article>
-        <article class="stat-card"><div class="stat-heading">Questions answered <span class="stat-icon amber">✳</span></div><div class="stat-value">—</div><div class="stat-caption">Ask your knowledge in a later milestone</div></article>
-      </div>
-
-      <section class="content-card sources-card">
-        <div class="section-heading"><div><h2>Knowledge sources</h2><p>Bring your team's information together in one place.</p></div><button class="text-button" type="button" disabled>View all <span>→</span></button></div>
-        <div class="empty-state"><div class="empty-illustration"><span class="paper paper-back"></span><span class="paper paper-front"><i></i><i></i><i></i></span><span class="sparkle">✦</span></div><h3>Your knowledge starts here</h3><p>Connect a knowledge source to make your team's information easier to find and understand.</p><button class="secondary-button" type="button" disabled>＋&nbsp; Connect a source</button><small>Source connections are coming in a later milestone.</small></div>
-      </section>
-
-      <div class="bottom-grid">
-        <section class="content-card activity-card"><div class="section-heading"><div><h2>Recent activity</h2><p>Updates from across your workspace.</p></div></div><div class="quiet-state"><span class="activity-icon">◷</span><span>No activity yet. It will show here as your workspace grows.</span></div></section>
-        <section class="content-card system-card"><div class="section-heading"><div><h2>System status</h2><p>Development services</p></div><span class="live-indicator"><i></i> Live</span></div><div class="service-row"><span class="service-dot" [class.connected]="apiStatus() === 'Connected'"></span><span>KnowSphere API</span><strong>{{ apiStatus() }}</strong></div><div class="service-row"><span class="service-dot"></span><span>Knowledge processing</span><strong class="not-configured">Not configured</strong></div><p class="status-note">API status checks the local health endpoint.</p></section>
-      </div>
-      <footer>KnowSphere AI <span>·</span> Knowledge that works together.</footer>
-    </section>
-  </main>
+<div class="workspace-shell">
+  <app-sidebar [mobileOpen]="mobileNavOpen()" (close)="mobileNavOpen.set(false)" />
+  <div class="workspace-main">
+    <app-header (menu)="mobileNavOpen.set(true)" />
+    <main id="main-content" class="route-content">
+      <router-outlet />
+    </main>
+  </div>
 </div>

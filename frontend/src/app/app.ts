@@ -1,21 +1,15 @@
-import { HttpClient } from '@angular/common/http';
-import { Component, inject, signal } from '@angular/core';
-import { environment } from '../environments/environment';
+import { Component, signal } from '@angular/core';
+import { RouterOutlet } from '@angular/router';
+import { HeaderComponent } from './layout/header.component';
+import { SidebarComponent } from './layout/sidebar.component';
 
 @Component({
   selector: 'app-root',
-  imports: [],
+  standalone: true,
+  imports: [RouterOutlet, HeaderComponent, SidebarComponent],
   templateUrl: './app.html',
-  styleUrl: './app.scss'
+  styleUrl: './app.scss',
 })
 export class App {
-  private readonly http = inject(HttpClient);
-  protected readonly apiStatus = signal('Checking…');
-
-  constructor() {
-    this.http.get(`${environment.apiUrl}/health`).subscribe({
-      next: () => this.apiStatus.set('Connected'),
-      error: () => this.apiStatus.set('Unavailable'),
-    });
-  }
+  protected readonly mobileNavOpen = signal(false);
 }

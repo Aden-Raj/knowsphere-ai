@@ -1,0 +1,54 @@
+<section class="page dashboard-page">
+  <div class="page-heading welcome">
+    <div><p class="eyebrow">YOUR KNOWLEDGE, CONNECTED</p><h1>Workspace overview</h1><p>A live view of your documents and knowledge conversations.</p></div>
+    <div class="heading-actions">
+      <a class="button" routerLink="/chat"><app-icon name="chat" /> Ask a question</a>
+      <a class="button button-primary" routerLink="/knowledge-base"><app-icon name="plus" /> Add documents</a>
+    </div>
+  </div>
+
+  @if (error()) { <app-status-view kind="error" [message]="error()" actionLabel="Retry" (action)="load()" /> }
+
+  <div class="stat-grid" aria-label="Document processing summary">
+    <app-summary-card label="Total documents" [value]="loading() || error() ? '—' : documents().length" caption="In your knowledge base" icon="files" />
+    <app-summary-card label="Completed" [value]="loading() || error() ? '—' : count('completed')" caption="Ready for retrieval" icon="check" tone="green" />
+    <app-summary-card label="Processing" [value]="loading() || error() ? '—' : count('processing')" caption="Being indexed" icon="clock" tone="amber" />
+    <app-summary-card label="Failed" [value]="loading() || error() ? '—' : count('failed')" caption="May need reindexing" icon="alert" tone="red" />
+  </div>
+
+  <div class="dashboard-grid">
+    <section class="panel recent-documents">
+      <div class="panel-heading"><div><h2>Recent documents</h2><p>Latest files added to your workspace</p></div><a class="inline-link" routerLink="/knowledge-base">View all <app-icon name="arrow" /></a></div>
+      @if (loading()) { <div class="panel-body"><app-status-view message="Loading documents…" /></div> }
+      @else if (!error() && documents().length) {
+        <div class="table-wrap"><table><thead><tr><th>DOCUMENT</th><th>STATUS</th><th>CHUNKS</th><th>ADDED</th></tr></thead><tbody>
+          @for (document of documents().slice(0, 5); track document.id) {
+            <tr><td><a class="doc-name" [routerLink]="['/knowledge-base', document.id]"><span class="doc-icon"><app-icon name="file" /></span><span><strong>{{ document.original_filename || document.title }}</strong><small>{{ document.file_extension?.toUpperCase() || 'DOCUMENT' }}</small></span></a></td><td><span class="status-badge" [class]="'status-badge ' + document.status"><i></i>{{ document.status }}</span></td><td>{{ document.chunk_count }}</td><td class="date-cell">{{ document.created_at | date:'MMM d, y' }}</td></tr>
+          }
+        </tbody></table></div>
+      } @else if (!error()) {
+        <div class="empty-panel"><span class="empty-mark"><app-icon name="files" /></span><strong>No documents yet</strong><p>Upload reports, guides, and notes to build your searchable knowledge base.</p><a class="button button-primary" routerLink="/knowledge-base"><app-icon name="upload" /> Upload your first document</a></div>
+      }
+    </section>
+
+    <section class="panel recent-conversations">
+      <div class="panel-heading"><div><h2>Recent conversations</h2><p>Questions asked across your workspace</p></div><a class="inline-link" routerLink="/conversations">History <app-icon name="arrow" /></a></div>
+      @if (loading()) { <div class="panel-body"><app-status-view message="Loading conversations…" /></div> }
+      @else if (!error() && conversations().length) {
+        <div class="conversation-list">
+          @for (conversation of conversations().slice(0, 5); track conversation.id) {
+            <a class="conversation-row" [routerLink]="['/chat', conversation.id]"><span class="conversation-icon"><app-icon name="chat" /></span><span class="conversation-copy"><strong>{{ conversation.title }}</strong><small>{{ conversation.updated_at | date:'MMM d · h:mm a' }}</small></span><app-icon class="row-arrow" name="arrow" /></a>
+          }
+        </div>
+      } @else if (!error()) {
+        <div class="compact-empty"><span class="empty-mark"><app-icon name="chat" /></span><strong>No conversations yet</strong><p>Ask a question grounded in your documents.</p><a class="inline-link" routerLink="/chat">Start a conversation <app-icon name="arrow" /></a></div>
+      }
+    </section>
+  </div>
+
+  <div class="lower-grid">
+    <section class="welcome-card"><div class="welcome-symbol"><app-icon name="spark" /></div><div><p class="eyebrow">KNOWLEDGE THAT WORKS TOGETHER</p><h2>Make your documents easier to understand.</h2><p>Search across your sources and explore answers with references back to the original material.</p></div><a class="button button-primary" routerLink="/chat">Open AI chat <app-icon name="arrow" /></a></section>
+    <section class="panel health-panel"><div class="panel-heading"><div><h2>System status</h2><p>Live checks from the backend</p></div><button type="button" class="icon-button" (click)="refreshHealth()" aria-label="Refresh status"><app-icon name="refresh" /></button></div><div class="health-row"><span class="health-light" [class.online]="apiStatus() === 'connected'" [class.offline]="apiStatus() === 'unavailable'"></span><span>KnowSphere API</span><strong>{{ apiStatus() }}</strong></div><div class="health-row"><span class="health-light" [class.online]="dbStatus() === 'connected'" [class.offline]="dbStatus() === 'unavailable'"></span><span>PostgreSQL</span><strong>{{ dbStatus() }}</strong></div></section>
+  </div>
+  <footer class="page-footer">KnowSphere AI <span>·</span> Your workspace, your knowledge.</footer>
+</section>
