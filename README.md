@@ -60,7 +60,7 @@ Processing will be designed for retries and duplicate detection. PostgreSQL will
 
 ### Semantic search and citation-based RAG
 
-Search will embed a user query, retrieve relevant chunks from ChromaDB, apply workspace and document access filters, and assemble context for the configured language model. Answers will include source references tied to the retrieved chunks so users can inspect the supporting document, page, or section. If the available context does not support an answer, the service should say so rather than invent a source.
+The RAG retrieval path combines semantic search over persistent ChromaDB embeddings with a local BM25 lexical pass over the indexed chunk text. Both candidate sets honor document ID filters and are fused using Reciprocal Rank Fusion, so entity and exact-term matches can complement semantic matches without comparing incompatible raw scores. The configured minimum relevance threshold still gates semantic candidates; lexical matches provide a separate evidence path. Context and citations are built from the retrieved chunks and their stored source metadata. Answer generation remains optional and uses only retrieved evidence when a provider is configured.
 
 ### LangGraph agents and AI tools
 

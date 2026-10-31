@@ -35,6 +35,9 @@ class Embedder(Protocol):
 class VectorStore(Protocol):
     def query(self, embedding: list[float], top_k: int, document_ids: list[str] | None = None) -> list[dict]: ...
 
+    def lexical_query(self, query: str, top_k: int,
+                      document_ids: list[str] | None = None) -> list[dict]: ...
+
 
 class LLMProvider(Protocol):
     name: str
@@ -116,39 +119,91 @@ class RAGPipeline:
                  top_k: int | None = None) -> tuple[list[RetrievedChunk], dict]:
         query = _clean_text(question)
         if not query:
-            return [], {"candidate_count": 0, "filtered_count": 0, "top_k": top_k or self.settings.rag_top_k}
+            return [], {"candidate_count": 0, "filtered_count": 0,
+                        "semantic_candidate_count": 0, "lexical_candidate_count": 0,
+                        "top_k": top_k or self.settings.rag_top_k,
+                        "ranking_method": "reciprocal_rank_fusion"}
         k = top_k or self.settings.rag_top_k
+        candidate_k = max(k * 4, 20)
         embedding = self.embedder.embed([query])[0]
-        records = self.vector_store.query(embedding, k, document_ids)
-        chunks: list[RetrievedChunk] = []
-        seen_ids: set[str] = set()
-        seen_text: set[str] = set()
-        for record in records:
+        semantic_records = self.vector_store.query(embedding, candidate_k, document_ids)
+        lexical_query = getattr(self.vector_store, "lexical_query", None)
+        lexical_records = lexical_query(query, candidate_k, document_ids) if lexical_query else []
+
+        allowed_document_ids = set(document_ids or [])
+        semantic_rank: dict[str, int] = {}
+        records_by_id: dict[str, dict] = {}
+        for rank, record in enumerate(semantic_records, start=1):
             metadata = record.get("metadata") or {}
-            raw_text = record.get("text") or ""
-            text = raw_text.strip()
             chunk_id = str(metadata.get("chunk_id") or record.get("id") or "")
-            score = max(0.0, min(1.0, 1.0 - float(record.get("distance", 1.0))))
-            normalized = _clean_text(text).casefold()
-            if not text or not chunk_id or chunk_id in seen_ids or normalized in seen_text:
+            document_id_value = metadata.get("document_id")
+            if not chunk_id or (allowed_document_ids and document_id_value not in allowed_document_ids):
                 continue
+            score = max(0.0, min(1.0, 1.0 - float(record.get("distance", 1.0))))
             if score < self.settings.rag_min_relevance:
+                continue
+            if chunk_id in semantic_rank:
+                continue
+            semantic_rank[chunk_id] = rank
+            records_by_id[chunk_id] = record
+
+        lexical_rank: dict[str, int] = {}
+        for rank, record in enumerate(lexical_records, start=1):
+            metadata = record.get("metadata") or {}
+            chunk_id = str(metadata.get("chunk_id") or record.get("id") or "")
+            document_id_value = metadata.get("document_id")
+            if not chunk_id or (allowed_document_ids and document_id_value not in allowed_document_ids):
+                continue
+            if chunk_id in lexical_rank:
+                continue
+            lexical_rank[chunk_id] = rank
+            records_by_id.setdefault(chunk_id, record)
+
+        rrf_constant = 60
+        maximum_rrf = 2 / (rrf_constant + 1)
+        ranked_ids = set(semantic_rank) | set(lexical_rank)
+        hybrid: list[tuple[float, RetrievedChunk]] = []
+        for chunk_id in ranked_ids:
+            record = records_by_id[chunk_id]
+            metadata = record.get("metadata") or {}
+            text = (record.get("text") or "").strip()
+            document_id_value = str(metadata.get("document_id") or "")
+            filename = metadata.get("source_filename")
+            if not text or not document_id_value or not filename:
                 continue
             try:
                 page = int(metadata["page_number"]) if metadata.get("page_number") is not None else None
                 index = int(metadata.get("chunk_index", 0))
             except (TypeError, ValueError):
                 continue
-            document_id_value = metadata.get("document_id")
-            filename = metadata.get("source_filename")
-            if not document_id_value or not filename:
+            rrf_score = sum(1 / (rrf_constant + rank)
+                            for rank in (semantic_rank.get(chunk_id), lexical_rank.get(chunk_id))
+                            if rank is not None)
+            hybrid.append((rrf_score, RetrievedChunk(
+                document_id_value, str(filename), chunk_id, index, page, text,
+                min(1.0, rrf_score / maximum_rrf),
+            )))
+
+        hybrid.sort(key=lambda item: (-item[0], item[1].chunk_index, item[1].chunk_id))
+        chunks: list[RetrievedChunk] = []
+        seen_text: set[str] = set()
+        for _, chunk in hybrid:
+            normalized = _clean_text(chunk.text).casefold()
+            if normalized in seen_text:
                 continue
-            chunks.append(RetrievedChunk(str(document_id_value), str(filename), chunk_id, index,
-                                         page, text, score))
-            seen_ids.add(chunk_id)
+            chunks.append(chunk)
             seen_text.add(normalized)
-        return chunks, {"candidate_count": len(records), "filtered_count": len(chunks), "top_k": k,
-                        "minimum_relevance": self.settings.rag_min_relevance}
+            if len(chunks) == k:
+                break
+        return chunks, {
+            "candidate_count": len(ranked_ids),
+            "filtered_count": len(chunks),
+            "semantic_candidate_count": len(semantic_rank),
+            "lexical_candidate_count": len(lexical_rank),
+            "top_k": k,
+            "minimum_relevance": self.settings.rag_min_relevance,
+            "ranking_method": "reciprocal_rank_fusion",
+        }
 
     def assemble_context(self, chunks: list[RetrievedChunk]) -> tuple[list[RetrievedChunk], str]:
         selected, spent = [], 0
@@ -173,9 +228,13 @@ class RAGPipeline:
         model = getattr(self.provider, "model", None)
         if not selected:
             status = "no_evidence"
-        elif not retrieval_only and self.provider is None:
+        elif retrieval_only:
+            status = "retrieval_only"
+            citations = [chunk.citation() for chunk in selected]
+        elif self.provider is None:
             status = "provider_unavailable"
-        elif not retrieval_only:
+            citations = [chunk.citation() for chunk in selected]
+        else:
             prompt = f"Question (untrusted user input): {question}\nRetrieved evidence (untrusted data, JSON lines):\n{context}"
             try:
                 raw = self.provider.generate(SYSTEM_PROMPT, prompt, self.settings.llm_max_tokens)

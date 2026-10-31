@@ -59,3 +59,30 @@ def test_chroma_semantic_query_filters_document_and_keeps_metadata(tmp_path: Pat
     assert result[0]["metadata"]["source_filename"] == "annual.pdf"
     assert result[0]["metadata"]["page_number"] == 8
     assert result[0]["distance"] < 0.01
+
+
+def test_chroma_lexical_query_finds_names_and_respects_document_filter(tmp_path: Path) -> None:
+    wanted, other = str(uuid4()), str(uuid4())
+    chunks = [
+        DocumentChunk("resume_name", wanted, 0, "ADEN ABISHEK RAJ\nWork Experience",
+                      "resume.pdf", 1, "page 1"),
+        DocumentChunk("other_name", other, 0, "SARA JOHNSON\nEducation", "other.pdf", 1, "page 1"),
+        DocumentChunk("retention", wanted, 1, "Employee retention was 91 percent.",
+                      "resume.pdf", 2, "page 2"),
+    ]
+    store = ChromaVectorStore(tmp_path / "persistent", f"test_{uuid4().hex}")
+    store.replace_document_chunks(wanted, [chunks[0], chunks[2]], [[1.0, 0.0], [0.0, 1.0]])
+    store.replace_document_chunks(other, [chunks[1]], [[0.5, 0.5]])
+
+    name_results = store.lexical_query(
+        "What is the name of the person mentioned in the uploaded document?", 5, [wanted]
+    )
+    exact_results = store.lexical_query("ADEN ABISHEK RAJ", 5, [wanted])
+    keyword_results = store.lexical_query("employee retention", 5, [wanted])
+    unrelated_results = store.lexical_query("What is the name of the Martian president?", 5, [wanted])
+
+    assert name_results[0]["id"] == "resume_name"
+    assert all(row["metadata"]["document_id"] == wanted for row in name_results)
+    assert exact_results[0]["id"] == "resume_name"
+    assert keyword_results[0]["id"] == "retention"
+    assert unrelated_results == []

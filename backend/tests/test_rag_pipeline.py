@@ -1,4 +1,5 @@
 import json
+import re
 from uuid import uuid4
 
 import pytest
@@ -13,8 +14,9 @@ class FakeEmbedder:
 
 
 class FakeStore:
-    def __init__(self, records):
+    def __init__(self, records, lexical_records=None):
         self.records = records
+        self.lexical_records = lexical_records or []
         self.document_ids = None
 
     def query(self, embedding, top_k, document_ids=None):
@@ -23,6 +25,33 @@ class FakeStore:
         if document_ids:
             records = [row for row in records if row["metadata"]["document_id"] in document_ids]
         return records[:top_k]
+
+    def lexical_query(self, query, top_k, document_ids=None):
+        records = self.lexical_records
+        if not records:
+            records = self.records
+        if document_ids:
+            records = [row for row in records if row["metadata"]["document_id"] in document_ids]
+        terms = set(re.findall(r"[a-z0-9]+", query.casefold())) - {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "of",
+            "on", "or", "the", "to", "what", "when", "where", "which", "with", "uploaded",
+            "document", "mentioned",
+        }
+        name_role = re.search(r"\b(person|candidate|applicant|author|individual)\b", query, re.I)
+        name_action = re.search(r"\b(name|named|mentioned|listed|identified)\b", query, re.I)
+        who_refers_to_document = re.search(
+            r"\bwho\b.*\b(mentioned|named|listed|identified)\b.*\b(document|file|resume|cv|uploaded)\b",
+            query, re.I,
+        )
+        name_intent = bool((name_role and name_action) or who_refers_to_document)
+        matches = []
+        for row in records:
+            text = row.get("text", "")
+            chunk_terms = set(re.findall(r"[a-z0-9]+", text.casefold()))
+            has_name = bool(re.search(r"\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,3}\b", text))
+            if terms & chunk_terms or (name_intent and has_name):
+                matches.append(row)
+        return matches[:top_k]
 
 
 def record(document_id, text="Revenue grew by 15%.", score=0.9, index=0, page=3):
@@ -48,7 +77,9 @@ class FakeProvider:
 def pipeline(records, **kwargs):
     settings = Settings(rag_min_relevance=kwargs.pop("threshold", 0.2),
                         rag_context_token_budget=kwargs.pop("budget", 4000))
-    return RAGPipeline(FakeEmbedder(), FakeStore(records), settings, kwargs.get("provider")), settings
+    lexical_records = kwargs.pop("lexical_records", None)
+    return RAGPipeline(FakeEmbedder(), FakeStore(records, lexical_records), settings,
+                       kwargs.get("provider")), settings
 
 
 def test_semantic_retrieval_and_document_filter():
@@ -57,6 +88,69 @@ def test_semantic_retrieval_and_document_filter():
     chunks, metadata = p.retrieve("revenue?", [a])
     assert [c.document_id for c in chunks] == [a]
     assert metadata["candidate_count"] == 1
+
+
+def test_hybrid_retrieval_finds_name_for_natural_language_identity_question():
+    did = str(uuid4())
+    name_chunk = record(did, "ADEN ABISHEK RAJ\nWork Experience", score=0.08, index=0)
+    p, _ = pipeline([name_chunk], lexical_records=[name_chunk])
+
+    result = p.query("What is the name of the person mentioned in the uploaded document?",
+                     [did], retrieval_only=True)
+
+    assert result["generation_status"] == "retrieval_only"
+    assert len(result["retrieved_chunks"]) == 1
+    assert result["retrieved_chunks"][0]["text"].startswith("ADEN ABISHEK RAJ")
+    assert result["citations"][0]["document_id"] == did
+    assert result["citations"][0]["chunk_id"] == name_chunk["id"]
+
+
+def test_hybrid_retrieval_supports_exact_names_and_keyword_hits():
+    did = str(uuid4())
+    name_chunk = record(did, "ADEN ABISHEK RAJ", score=0.05)
+    keyword_chunk = record(did, "Employee retention reached 91 percent.", score=0.05, index=1)
+    p, _ = pipeline([name_chunk, keyword_chunk], lexical_records=[name_chunk, keyword_chunk])
+
+    exact, _ = p.retrieve("ADEN ABISHEK RAJ", [did])
+    keyword, _ = p.retrieve("employee retention", [did])
+
+    assert exact and exact[0].chunk_id == name_chunk["id"]
+    assert keyword and keyword[0].chunk_id == keyword_chunk["id"]
+
+
+def test_hybrid_retrieval_preserves_semantic_paraphrases_and_scopes_documents():
+    wanted, other = str(uuid4()), str(uuid4())
+    semantic_chunk = record(wanted, "Revenue grew by 15 percent.", score=0.85)
+    leaked_lexical = record(other, "ADEN ABISHEK RAJ", score=0.04, index=1)
+    p, _ = pipeline([semantic_chunk, leaked_lexical], lexical_records=[leaked_lexical])
+
+    chunks, _ = p.retrieve("How did the company's income change?", [wanted])
+
+    assert [chunk.document_id for chunk in chunks] == [wanted]
+    assert chunks[0].chunk_id == semantic_chunk["id"]
+
+
+def test_hybrid_retrieval_deduplicates_candidates_and_rejects_irrelevant_query():
+    did = str(uuid4())
+    candidate = record(did, "ADEN ABISHEK RAJ", score=0.05)
+    p, _ = pipeline([candidate], lexical_records=[candidate, candidate])
+
+    chunks, metadata = p.retrieve("What is the person's name?", [did])
+    irrelevant, _ = p.retrieve("What is the capital of France?")
+    unrelated_person, _ = p.retrieve("What is the name of the Martian president?")
+
+    assert len(chunks) == 1
+    assert metadata["candidate_count"] == 1
+    assert irrelevant == []
+    assert unrelated_person == []
+
+
+def test_hybrid_empty_knowledge_base_returns_no_evidence():
+    p, _ = pipeline([])
+    result = p.query("What is the person's name?", retrieval_only=True)
+    assert result["generation_status"] == "no_evidence"
+    assert result["retrieved_chunks"] == []
+    assert result["citations"] == []
 
 
 def test_relevance_threshold_duplicate_and_metadata_filtering():
@@ -76,7 +170,8 @@ def test_context_budget_and_citation_is_derived_from_actual_chunk():
     assert selected[0].included_in_context
     assert p.settings.rag_context_token_budget == 128
     result = p.query("what happened?", retrieval_only=True)
-    assert result["citations"] == []
+    assert len(result["citations"]) == 1
+    assert result["citations"][0]["chunk_id"] == f"{did}_0"
     assert result["retrieved_chunks"][0]["chunk_id"] == f"{did}_0"
 
 

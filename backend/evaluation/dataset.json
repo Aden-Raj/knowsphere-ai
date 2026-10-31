@@ -16,5 +16,17 @@
     "answer_evidence": "Employee retention was 91%.",
     "expected_chunk_id": "eval_retention",
     "document_text": "The human resources summary reports an employee retention rate of 91 percent for fiscal year 2025."
+  },
+  {
+    "question": "What is the name of the person mentioned in the uploaded document?",
+    "answer_evidence": "ADEN ABISHEK RAJ",
+    "expected_chunk_id": "eval_resume_name",
+    "document_text": "ADEN ABISHEK RAJ\nWork Experience"
+  },
+  {
+    "question": "What is the boiling point of xenon?",
+    "answer_evidence": null,
+    "expected_chunk_id": null,
+    "document_text": "The unrelated source contains basic company financial, location, and employee figures."
   }
 ]

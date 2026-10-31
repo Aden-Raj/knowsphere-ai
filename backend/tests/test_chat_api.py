@@ -74,6 +74,39 @@ def test_validation_and_retrieve_without_persistence(api_client):
     assert client.get("/api/v1/chat/conversations").json() == []
 
 
+def test_retrieve_endpoint_returns_hybrid_evidence_with_verifiable_citation(api_client):
+    client, _, _ = api_client
+    store = Store()
+    store.doc_id, store.chunk = str(uuid4()), str(uuid4())
+
+    class LexicalOnlyStore(Store):
+        def query(self, embedding, top_k, document_ids=None):
+            row = super().query(embedding, top_k, document_ids)[0]
+            row["distance"] = 0.95
+            return [row]
+
+        def lexical_query(self, query, top_k, document_ids=None):
+            return super().query([0.0], top_k, document_ids)
+
+    hybrid_store = LexicalOnlyStore()
+    hybrid_store.doc_id, hybrid_store.chunk = store.doc_id, store.chunk
+    pipeline = RAGPipeline(Embedder(), hybrid_store, Settings())
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+
+    response = client.post("/api/v1/chat/retrieve", json={
+        "question": "What is the person's name?", "document_ids": [store.doc_id]
+    })
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["generation_status"] == "retrieval_only"
+    assert body["retrieved_chunks"][0]["document_id"] == store.doc_id
+    assert body["citations"][0]["document_id"] == store.doc_id
+    assert body["citations"][0]["chunk_id"] == body["retrieved_chunks"][0]["chunk_id"]
+
+
 def test_missing_conversation_on_followup_returns_404(api_client):
     client, _, _ = api_client
     from app.api.routes.chat import get_rag_pipeline
