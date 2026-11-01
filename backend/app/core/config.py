@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     openai_compatible_base_url: str | None = None
     openai_compatible_api_key: SecretStr | None = None
-    llm_timeout_seconds: float = Field(default=60, gt=0, le=600)
+    llm_timeout_seconds: float = Field(default=180, gt=0, le=600)
     llm_max_tokens: int = Field(default=800, ge=1, le=32000)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

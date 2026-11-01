@@ -4,6 +4,7 @@ import { ActivatedRoute, Router } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import { apiErrorMessage } from '../../core/api-error';
 import { ChatMessageRecord, ConversationRecord, QueryResponse, RetrievedChunk } from '../../core/models';
+import { ChatAnswerBlock, parseChatAnswer } from './chat-answer-format';
 import { ChatService } from '../../core/services/chat.service';
 import { ConversationsService } from '../../core/services/conversations.service';
 import { DocumentsService } from '../../core/services/documents.service';
@@ -15,6 +16,7 @@ interface DisplayMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string | null;
+  answerBlocks: ChatAnswerBlock[];
   citations: QueryResponse['citations'];
   evidence: RetrievedChunk[];
   generationStatus: string | null;
@@ -103,7 +105,7 @@ export class ChatComponent implements OnInit {
     this.followLatest = true;
     this.messages.update((messages) => [...messages, {
       id: crypto.randomUUID(), role: 'user', content: question, citations: [], evidence: [],
-      generationStatus: null, createdAt: new Date().toISOString(),
+      answerBlocks: [], generationStatus: null, createdAt: new Date().toISOString(),
     }]);
     this.draft.set('');
     this.scrollToLatest();
@@ -115,6 +117,7 @@ export class ChatComponent implements OnInit {
         const id = result.conversation_id;
         this.messages.update((messages) => [...messages, {
           id: crypto.randomUUID(), role: 'assistant', content: result.answer,
+          answerBlocks: result.answer ? parseChatAnswer(result.answer) : [],
           citations: result.citations, evidence: result.retrieved_chunks,
           generationStatus: result.generation_status, createdAt: new Date().toISOString(),
         }]);
@@ -181,6 +184,7 @@ export class ChatComponent implements OnInit {
       id: message.id,
       role: assistant ? 'assistant' : 'user',
       content: !assistant || message.generation_status === 'generated' ? message.content : null,
+      answerBlocks: assistant && message.generation_status === 'generated' ? parseChatAnswer(message.content) : [],
       citations: message.citations || [],
       evidence: [],
       generationStatus: message.generation_status,

@@ -6,12 +6,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.services.factory import get_document_processor, get_file_storage
 from app.services.file_storage import FileStorage
 from tests.support import FakeProcessor
+
+
+@pytest.fixture(autouse=True)
+def isolate_local_settings(monkeypatch):
+    test_config = {**Settings.model_config, "env_file": None}
+    monkeypatch.setattr(Settings, "model_config", test_config)
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -28,7 +28,20 @@
           <div class="message-avatar">@if (message.role === 'assistant') { <app-icon name="spark" /> } @else { <span>YOU</span> }</div>
           <div class="message-content">
             <div class="message-meta"><strong>{{ message.role === 'assistant' ? 'KnowSphere AI' : 'You' }}</strong><time>{{ message.createdAt | date:'shortTime' }}</time></div>
-            @if (message.content) { <div class="answer-text">{{ message.content }}</div> }
+            @if (message.content) {
+              @if (message.role === 'assistant') {
+                <div class="answer-text formatted-answer">
+                  @for (block of message.answerBlocks; track $index) {
+                    @switch (block.kind) {
+                      @case ('heading') { <h3 class="answer-heading" [class.level-1]="block.level === 1" [class.level-2]="block.level === 2">{{ block.text }}</h3> }
+                      @case ('paragraph') { <p class="answer-paragraph">{{ block.text }}</p> }
+                      @case ('unordered-list') { <ul class="answer-list">@for (item of block.items; track $index) { <li>{{ item }}</li> }</ul> }
+                      @case ('ordered-list') { <ol class="answer-list">@for (item of block.items; track $index) { <li>{{ item }}</li> }</ol> }
+                    }
+                  }
+                </div>
+              } @else { <div class="answer-text">{{ message.content }}</div> }
+            }
             @else if (message.role === 'assistant') {
               <div class="generation-notice" [class.warn]="message.generationStatus !== 'no_evidence'"><app-icon [name]="message.generationStatus === 'no_evidence' ? 'search' : 'alert'"/><div><strong>{{ statusTitle(message.generationStatus) }}</strong><p>{{ statusText(message.generationStatus) }}</p></div></div>
             }
