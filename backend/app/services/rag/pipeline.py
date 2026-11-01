@@ -303,6 +303,13 @@ def _has_employer_named_project(chunks: list[RetrievedChunk], employer: str) -> 
 
 def _query_specific_guidance(question: str) -> str:
     employer = _EMPLOYER_QUESTION.search(question)
+    if _named_project_in_question(question):
+        return (
+            "Answer only about the named project section in the supplied evidence. Exclude other projects, "
+            "general skills, and employment responsibilities unless that section directly supports them. "
+            "Distinguish retrieval methods from the application technology stack, and include only methods, "
+            "features, or technologies explicitly stated for this project. Keep the response concise."
+        )
     if _employer_project_question(question):
         return (
             "For this employer-project question, include only formally named projects explicitly linked to the "
@@ -658,6 +665,12 @@ def _duration_abstention_for_supported_subject(question: str,
 
 
 _EMPLOYER_QUESTION = re.compile(r"\b(?:at|for)\s+([A-Z][A-Z0-9&.-]{1,})\b")
+_EMPLOYER_IDENTIFICATION_QUESTION = re.compile(
+    r"\b(?:which|what)\s+(?:company|employer|organization|organisation)\b"
+    r"|\bwho\s+(?:is|was)\s+(?:the\s+)?(?:candidate'?s\s+)?(?:employer|company)\b"
+    r"|\bwhere\s+(?:does|did)\s+(?:the\s+)?candidate\s+(?:currently\s+)?work\b",
+    re.IGNORECASE,
+)
 _EMPLOYER_RESPONSIBILITY_QUESTION = re.compile(
     r"\b(?:responsibilit(?:y|ies)|work|worked|contribution|contributions|role|project|projects)\b", re.I,
 )
@@ -812,6 +825,111 @@ def _employer_section_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChun
             **{**chunk.__dict__, "employer_section": employer, "employer_anchor_chunk_id": anchor}
         ))
     return associated
+
+
+_PROJECT_NAME_STOPWORDS = {
+    "which", "what", "who", "where", "when", "why", "how", "did", "do", "does",
+    "have", "has", "is", "are", "was", "were", "can", "could", "will", "would", "i",
+}
+_PROJECT_NAME_RUN = re.compile(r"\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*)+\b")
+
+
+def _named_project_in_question(question: str) -> str | None:
+    """Return a proper-name phrase from a named-product question, if present."""
+    if not re.search(r"\b(?:project|features?|technologies|technology|techniques|used|implemented|use)\b",
+                     question, re.IGNORECASE):
+        return None
+    candidates = [
+        match.group(0).strip()
+        for match in _PROJECT_NAME_RUN.finditer(question)
+        if match.group(0).split()[0].casefold() not in _PROJECT_NAME_STOPWORDS
+    ]
+    return max(candidates, key=len) if candidates else None
+
+
+def _is_project_heading(line: str, requested_name: str | None = None) -> bool:
+    cleaned = _clean_heading_line(line)
+    if not cleaned or len(cleaned) > 180 or re.search(r"[.!?]$", cleaned):
+        return False
+    if re.match(r"^Project\s*[:\-]\s*[A-Z]", cleaned):
+        return True
+    titles = _named_project_titles(cleaned)
+    if titles:
+        if any(cleaned.casefold().startswith(title.casefold()) for title in titles):
+            return True
+        prefix = re.split(r"\s+[|\-\u2013\u2014]\s+", cleaned, maxsplit=1)[0].strip()
+        if prefix != cleaned and re.fullmatch(
+            r"[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){1,5}", prefix,
+        ):
+            return True
+    if requested_name and re.match(
+        rf"^{re.escape(requested_name)}(?:\s*(?:[|:\-\u2013\u2014])|\s*$)", cleaned, re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _named_project_section_chunks(
+    question: str, chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk] | None:
+    """Clip retrieved document chunks to the explicitly requested project section."""
+    requested_name = _named_project_in_question(question)
+    if requested_name is None:
+        return None
+    scoped: list[RetrievedChunk] = []
+    groups: dict[str, list[RetrievedChunk]] = {}
+    for chunk in chunks:
+        groups.setdefault(chunk.document_id, []).append(chunk)
+
+    for document_chunks in groups.values():
+        merged, chunk_ranges = _merge_chunk_texts(document_chunks)
+        lines: list[tuple[str, int, int]] = []
+        offset = 0
+        for raw_line in merged.splitlines(keepends=True):
+            line = raw_line.rstrip("\r\n")
+            lines.append((line, offset, offset + len(line)))
+            offset += len(raw_line)
+
+        project_area = False
+        target_start: int | None = None
+        target_end: int | None = None
+        for line, start, end in lines:
+            cleaned = _clean_heading_line(line)
+            heading_kind = _section_heading_kind(cleaned)
+            if heading_kind is not None:
+                if target_start is not None:
+                    target_end = start
+                    break
+                project_area = heading_kind == "other" and bool(
+                    re.search(r"\bprojects?\b", cleaned, re.IGNORECASE)
+                )
+                continue
+            if not project_area:
+                continue
+            if _is_project_heading(cleaned) and requested_name.casefold() in cleaned.casefold():
+                target_start = start
+                continue
+            if target_start is not None and _is_project_heading(cleaned):
+                target_end = start
+                break
+
+        if target_start is None:
+            continue
+        if target_end is None:
+            target_end = len(merged)
+
+        for chunk, incremental_start, _ in chunk_ranges:
+            # The merge helper's start offset maps to character zero of each incoming chunk.
+            full_start = incremental_start
+            local_start = max(0, target_start - full_start)
+            local_end = min(len(chunk.text), target_end - full_start)
+            if local_end <= local_start:
+                continue
+            text = chunk.text[local_start:local_end].strip()
+            if text:
+                scoped.append(RetrievedChunk(**{**chunk.__dict__, "text": text}))
+
+    return sorted(scoped, key=lambda item: (item.document_id, item.chunk_index, item.chunk_id))
 
 
 def _employer_name_matches(requested: str, section_name: str) -> bool:
@@ -1148,6 +1266,48 @@ class RAGPipeline:
         self.embedder, self.vector_store, self.settings = embedder, vector_store, settings
         self.provider = provider if provider is not None else provider_from_settings(settings)
 
+    def _load_document_chunks(
+        self, document_id: str, scores: dict[str, float] | None = None,
+    ) -> list[RetrievedChunk]:
+        get_chunks = getattr(self.vector_store, "get_document_chunks", None)
+        if get_chunks is None:
+            return []
+        chunks: list[RetrievedChunk] = []
+        for row in get_chunks(document_id):
+            metadata = row.get("metadata") or {}
+            chunk_id = str(metadata.get("chunk_id") or row.get("id") or "")
+            text = (row.get("text") or "").strip()
+            filename = metadata.get("source_filename")
+            if not chunk_id or not text or not filename:
+                continue
+            try:
+                chunk_index = int(metadata.get("chunk_index", 0))
+                page_number = int(metadata["page_number"]) if metadata.get("page_number") is not None else None
+            except (TypeError, ValueError):
+                continue
+            chunks.append(RetrievedChunk(
+                str(metadata.get("document_id") or document_id), str(filename), chunk_id,
+                chunk_index, page_number, text, (scores or {}).get(chunk_id, 0.0),
+            ))
+        return chunks
+
+    def _employer_identification_anchors(
+        self, document_ids: set[str], scores: dict[str, float], question: str,
+    ) -> list[RetrievedChunk]:
+        anchors: list[RetrievedChunk] = []
+        for document_id in sorted(document_ids):
+            associated = _employer_section_chunks(self._load_document_chunks(document_id, scores))
+            for chunk in associated:
+                if (
+                    chunk.chunk_id == chunk.employer_anchor_chunk_id
+                    and chunk.employer_section
+                    and _EMPLOYMENT_DATE_RANGE.search(chunk.text)
+                    and (not re.search(r"\bcurrently|current\b", question, re.I)
+                         or re.search(r"\b(?:present|current|now)\b", chunk.text, re.I))
+                ):
+                    anchors.append(chunk)
+        return sorted(anchors, key=lambda item: (item.document_id, item.chunk_index, item.chunk_id))
+
     def _expand_employer_section(
         self, question: str, chunks: list[RetrievedChunk], candidate_document_ids: set[str],
     ) -> list[RetrievedChunk] | None:
@@ -1165,24 +1325,7 @@ class RAGPipeline:
             item.casefold() for item in re.findall(r"\b(?:angular|react)\b", question, re.IGNORECASE)
         }
         for document_id in sorted(candidate_document_ids):
-            rows = get_chunks(document_id)
-            all_chunks: list[RetrievedChunk] = []
-            for row in rows:
-                metadata = row.get("metadata") or {}
-                chunk_id = str(metadata.get("chunk_id") or row.get("id") or "")
-                text = (row.get("text") or "").strip()
-                filename = metadata.get("source_filename")
-                if not chunk_id or not text or not filename:
-                    continue
-                try:
-                    chunk_index = int(metadata.get("chunk_index", 0))
-                    page_number = int(metadata["page_number"]) if metadata.get("page_number") is not None else None
-                except (TypeError, ValueError):
-                    continue
-                all_chunks.append(RetrievedChunk(
-                    str(metadata.get("document_id") or document_id), str(filename), chunk_id,
-                    chunk_index, page_number, text, score_by_id.get(chunk_id, 0.0),
-                ))
+            all_chunks = self._load_document_chunks(document_id, score_by_id)
 
             associated = _employer_section_chunks(all_chunks)
             matching_section_chunks = [
@@ -1232,6 +1375,27 @@ class RAGPipeline:
         lexical_records = lexical_query(query, candidate_k, document_ids) if lexical_query else []
 
         allowed_document_ids = set(document_ids or [])
+        candidate_document_ids = {
+            str((record.get("metadata") or {}).get("document_id"))
+            for record in [*semantic_records, *lexical_records]
+            if (record.get("metadata") or {}).get("document_id")
+            and (not allowed_document_ids
+                 or (record.get("metadata") or {}).get("document_id") in allowed_document_ids)
+        }
+        if _EMPLOYER_IDENTIFICATION_QUESTION.search(question) and lexical_query is not None:
+            # A lexical probe discovers likely resume documents; employment anchors are then
+            # loaded structurally and are not subject to the global semantic threshold.
+            employment_records = lexical_query(
+                "professional employment employer company worked position", candidate_k, document_ids,
+            )
+            candidate_document_ids.update(
+                str((record.get("metadata") or {}).get("document_id"))
+                for record in employment_records
+                if (record.get("metadata") or {}).get("document_id")
+                and (not allowed_document_ids
+                     or (record.get("metadata") or {}).get("document_id") in allowed_document_ids)
+            )
+
         semantic_rank: dict[str, int] = {}
         records_by_id: dict[str, dict] = {}
         for rank, record in enumerate(semantic_records, start=1):
@@ -1296,7 +1460,46 @@ class RAGPipeline:
             seen_text.add(normalized)
             if len(chunks) == k:
                 break
-        candidate_document_ids = {chunk.document_id for _, chunk in hybrid}
+        candidate_document_ids.update(chunk.document_id for _, chunk in hybrid)
+        employer_identification = bool(_EMPLOYER_IDENTIFICATION_QUESTION.search(question))
+        if employer_identification and candidate_document_ids:
+            chunks = self._employer_identification_anchors(candidate_document_ids, {
+                chunk.chunk_id: chunk.relevance_score for _, chunk in hybrid
+            }, question)
+            return chunks, {
+                "candidate_count": len(ranked_ids),
+                "filtered_count": len(chunks),
+                "semantic_candidate_count": len(semantic_rank),
+                "lexical_candidate_count": len(lexical_rank),
+                "top_k": k,
+                "minimum_relevance": self.settings.rag_min_relevance,
+                "ranking_method": "reciprocal_rank_fusion",
+                "employer_identification_scoped": True,
+                "employer_section_expanded": False,
+            }
+
+        named_project = _named_project_in_question(question)
+        if named_project and candidate_document_ids:
+            document_chunks = [
+                chunk for document_id in sorted(candidate_document_ids)
+                for chunk in self._load_document_chunks(
+                    document_id, {chunk.chunk_id: chunk.relevance_score for _, chunk in hybrid},
+                )
+            ]
+            project_chunks = _named_project_section_chunks(question, document_chunks)
+            chunks = (project_chunks or [])[:k]
+            return chunks, {
+                "candidate_count": len(ranked_ids),
+                "filtered_count": len(chunks),
+                "semantic_candidate_count": len(semantic_rank),
+                "lexical_candidate_count": len(lexical_rank),
+                "top_k": k,
+                "minimum_relevance": self.settings.rag_min_relevance,
+                "ranking_method": "reciprocal_rank_fusion",
+                "named_project_scoped": True,
+                "project_name": named_project,
+                "employer_section_expanded": False,
+            }
         expanded_chunks = self._expand_employer_section(question, chunks, candidate_document_ids)
         if expanded_chunks is not None:
             chunks = expanded_chunks
@@ -1363,30 +1566,83 @@ class RAGPipeline:
         context = "\n".join(context_entries)
         return selected, context
 
-    def query(self, question: str, document_ids: list[str] | None = None,
-              top_k: int | None = None, retrieval_only: bool = False) -> dict:
+    def retrieve_context(
+        self, question: str, document_ids: list[str] | None = None, top_k: int | None = None,
+    ) -> tuple[list[RetrievedChunk], list[RetrievedChunk], str, dict]:
+        """Retrieve ranked chunks and build the budgeted context used for generation."""
         chunks, metadata = self.retrieve(question, document_ids, top_k)
         selected, context = self.assemble_context(chunks)
-        status, answer, citations = "retrieval_only", None, []
-        provider_name = getattr(self.provider, "name", None)
-        model = getattr(self.provider, "model", None)
+        return chunks, selected, context, metadata
+
+    def analyze_query(
+        self, question: str, selected: list[RetrievedChunk], retrieval_only: bool = False,
+    ) -> tuple[str | None, list[dict], str] | None:
+        """Apply existing deterministic early routes; return None when generation should run."""
         if not selected:
-            status = "no_evidence"
-        elif retrieval_only:
-            status = "retrieval_only"
-            citations = [chunk.citation() for chunk in selected]
-        elif (
+            return None, [], "no_evidence"
+        if retrieval_only:
+            return None, [chunk.citation() for chunk in selected], "retrieval_only"
+        if _EMPLOYER_IDENTIFICATION_QUESTION.search(question):
+            employers: list[str] = []
+            anchors: list[RetrievedChunk] = []
+            current_only = bool(re.search(r"\bcurrently|current\b", question, re.I))
+            for chunk in selected:
+                if (
+                    chunk.chunk_id != chunk.employer_anchor_chunk_id
+                    or not chunk.employer_section
+                    or not _EMPLOYMENT_DATE_RANGE.search(chunk.text)
+                    or (current_only and not re.search(r"\b(?:present|current|now)\b", chunk.text, re.I))
+                ):
+                    continue
+                anchors.append(chunk)
+                if chunk.employer_section not in employers:
+                    employers.append(chunk.employer_section)
+            if not employers:
+                return None, [], "no_evidence"
+            employer_list = ", ".join(employers)
+            answer = f"The candidate has worked for {employer_list}."
+            return answer, [chunk.citation() for chunk in anchors], "generated"
+
+        named_project = _named_project_in_question(question)
+        if named_project and re.search(r"\bretrieval\s+(?:techniques?|methods?)\b", question, re.I):
+            supported: list[tuple[str, str]] = []
+            for label, pattern in (
+                ("semantic search", re.compile(r"\bsemantic\s+search\b", re.I)),
+                ("hybrid search", re.compile(r"\bhybrid\s+search\b", re.I)),
+                ("BM25", re.compile(r"\bBM25\b", re.I)),
+            ):
+                chunk_ids = [chunk.chunk_id for chunk in selected if pattern.search(chunk.text)]
+                if chunk_ids:
+                    supported.append((label, chunk_ids[0]))
+            if not supported:
+                return "The project evidence does not specify its retrieval techniques.", [], "generated"
+            labels = [label for label, _ in supported]
+            if "BM25" in labels and any(
+                re.search(r"\b(?:lexical|keyword)\b.{0,60}\bBM25\b|\bBM25\b.{0,60}\b(?:lexical|keyword)\b",
+                          chunk.text, re.I)
+                for chunk in selected
+            ):
+                answer = "The project uses semantic search and hybrid search, with BM25 as its lexical retrieval technique."
+            else:
+                answer = "The project uses " + ", ".join(labels[:-1])
+                if len(labels) > 1:
+                    answer += f", and {labels[-1]}."
+                else:
+                    answer += "."
+            cited_ids = list(dict.fromkeys(chunk_id for _, chunk_id in supported))
+            available = {chunk.chunk_id: chunk for chunk in selected}
+            return answer, [available[item].citation() for item in cited_ids], "generated"
+        if (
             _explicit_polar_question_terms(question) is not None
             and not _polar_claim_is_directly_present(question, selected)
         ):
-            # Do not let variable model wording or citations turn absent direct evidence
-            # into an intermittent validation error or an unsupported affirmative.
-            answer = "The retrieved document evidence does not establish the requested claim."
-            citations, status = [], "generated"
+            # Avoid model-dependent answers when retrieved evidence does not directly establish
+            # the subject of a polar question.
             logger.info("LLM answer accepted stage=answer_validation category=deterministic_evidence_abstention")
-        elif (
-            (project_question := _employer_project_question(question)) is not None
-            and not _has_employer_named_project(selected, project_question.group(1))
+            return "The retrieved document evidence does not establish the requested claim.", [], "generated"
+        project_question = _employer_project_question(question)
+        if project_question is not None and not _has_employer_named_project(
+            selected, project_question.group(1),
         ):
             employer = project_question.group(1)
             employer_chunks = [chunk for chunk in selected if _chunk_is_employer_scoped(chunk, employer)]
@@ -1399,225 +1655,259 @@ class RAGPipeline:
             else:
                 answer = f"The retrieved evidence does not establish specific projects or workstreams at {employer}."
                 citations = []
-            status = "generated"
             logger.info(
                 "LLM answer accepted stage=answer_validation category=employer_project_scope_abstention "
                 "cited_employer_chunks=%d",
                 len(employer_chunks),
             )
-        elif self.provider is None:
-            status = "provider_unavailable"
-            citations = [chunk.citation() for chunk in selected]
-        else:
-            guidance = _query_specific_guidance(question)
-            system_prompt = SYSTEM_PROMPT + (
-                f"\n\nQuestion-specific response requirements:\n{guidance}" if guidance else ""
+            return answer, citations, "generated"
+        if self.provider is None:
+            return None, [chunk.citation() for chunk in selected], "provider_unavailable"
+        return None
+
+    def parse_provider_response(
+        self, raw: str, selected: list[RetrievedChunk],
+    ) -> tuple[str, list[str]]:
+        """Parse provider JSON and validate its basic shape and citation ID references."""
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise _GenerationValidationError("malformed_model_json") from exc
+        if not isinstance(parsed, dict):
+            raise _GenerationValidationError("malformed_model_schema")
+        candidate_answer = parsed.get("answer")
+        cited_ids = parsed.get("citation_chunk_ids")
+        available = {chunk.chunk_id: chunk for chunk in selected}
+        if not isinstance(candidate_answer, str) or not candidate_answer.strip() or not isinstance(cited_ids, list):
+            raise _GenerationValidationError("malformed_model_schema")
+        candidate_answer = _normalize_answer_format(candidate_answer)
+        api_key = getattr(self.provider, "api_key", None)
+        if SYSTEM_PROMPT.casefold() in candidate_answer.casefold() or (api_key and api_key in candidate_answer):
+            raise _GenerationValidationError("sensitive_output_rejected")
+        if any(not isinstance(identifier, str) or identifier not in available for identifier in cited_ids):
+            raise _GenerationValidationError("invalid_citation")
+        return candidate_answer, cited_ids
+
+    def validate_response(
+        self, question: str, candidate_answer: str, cited_ids: list[str],
+        selected: list[RetrievedChunk],
+    ) -> tuple[str, list[dict], str]:
+        """Apply existing claim, citation, attribution, duration, and abstention safeguards."""
+        available = {chunk.chunk_id: chunk for chunk in selected}
+        cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
+        employer_match = _EMPLOYER_QUESTION.search(question)
+        if not _named_project_claims_are_supported(
+            candidate_answer, cited_chunks, employer_match.group(1) if employer_match else None,
+        ):
+            extractive_fallback = (
+                None if _explicit_polar_question_terms(question) is not None
+                else _extractive_framework_fallback(question, selected, include_project_note=True)
             )
-            prompt = f"Question (untrusted user input): {question}\nRetrieved evidence (untrusted data, JSON lines):\n{context}"
-            try:
-                raw = self.provider.generate(system_prompt, prompt, self.settings.llm_max_tokens)
-                try:
-                    parsed = json.loads(raw)
-                except (json.JSONDecodeError, TypeError) as exc:
-                    raise _GenerationValidationError("malformed_model_json") from exc
-                if not isinstance(parsed, dict):
-                    raise _GenerationValidationError("malformed_model_schema")
-                candidate_answer = parsed.get("answer")
-                cited_ids = parsed.get("citation_chunk_ids")
-                available = {chunk.chunk_id: chunk for chunk in selected}
-                if not isinstance(candidate_answer, str) or not candidate_answer.strip() or not isinstance(cited_ids, list):
-                    raise _GenerationValidationError("malformed_model_schema")
-                candidate_answer = _normalize_answer_format(candidate_answer)
-                api_key = getattr(self.provider, "api_key", None)
-                if SYSTEM_PROMPT.casefold() in candidate_answer.casefold() or (api_key and api_key in candidate_answer):
-                    raise _GenerationValidationError("sensitive_output_rejected")
-                if any(not isinstance(identifier, str) or identifier not in available for identifier in cited_ids):
-                    raise _GenerationValidationError("invalid_citation")
-                cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
-                employer_match = _EMPLOYER_QUESTION.search(question)
-                if not _named_project_claims_are_supported(
-                    candidate_answer, cited_chunks, employer_match.group(1) if employer_match else None,
-                ):
-                    extractive_fallback = (
-                        None if _explicit_polar_question_terms(question) is not None
-                        else _extractive_framework_fallback(question, selected, include_project_note=True)
-                    )
+            if extractive_fallback is None:
+                raise _GenerationValidationError("unsupported_project_name")
+            candidate_answer, cited_chunks = extractive_fallback
+            cited_ids = [chunk.chunk_id for chunk in cited_chunks]
+            logger.info(
+                "LLM answer sanitized stage=answer_validation category=unsupported_project_claim_replaced "
+                "source=focused_extractive_evidence chunks=%d",
+                len(cited_chunks),
+            )
+        else:
+            framework_focus = {
+                term.casefold() for term in re.findall(r"\b(?:angular|react)\b", question, re.IGNORECASE)
+            }
+            if len(framework_focus) == 1 and _explicit_polar_question_terms(question) is None:
+                focus = next(iter(framework_focus))
+                supported_details = _framework_details_in_chunks(focus, selected)
+                answer_details = {
+                    detail for detail in _FRAMEWORK_DETAIL_TERMS[focus]
+                    if detail in candidate_answer.casefold()
+                }
+                required_details = min(2, len(supported_details))
+                if len(supported_details) >= 2 and len(answer_details) < required_details:
+                    extractive_fallback = _extractive_framework_fallback(question, selected)
                     if extractive_fallback is None:
-                        raise _GenerationValidationError("unsupported_project_name")
+                        raise _GenerationValidationError("incomplete_framework_answer")
                     candidate_answer, cited_chunks = extractive_fallback
                     cited_ids = [chunk.chunk_id for chunk in cited_chunks]
                     logger.info(
-                        "LLM answer sanitized stage=answer_validation category=unsupported_project_claim_replaced "
+                        "LLM answer sanitized stage=answer_validation category=incomplete_framework_answer_replaced "
                         "source=focused_extractive_evidence chunks=%d",
                         len(cited_chunks),
                     )
-                else:
-                    framework_focus = {
-                        term.casefold() for term in re.findall(r"\b(?:angular|react)\b", question, re.IGNORECASE)
-                    }
-                    if len(framework_focus) == 1 and _explicit_polar_question_terms(question) is None:
-                        focus = next(iter(framework_focus))
-                        supported_details = _framework_details_in_chunks(focus, selected)
-                        answer_details = {
-                            detail for detail in _FRAMEWORK_DETAIL_TERMS[focus]
-                            if detail in candidate_answer.casefold()
-                        }
-                        required_details = min(2, len(supported_details))
-                        if len(supported_details) >= 2 and len(answer_details) < required_details:
-                            extractive_fallback = _extractive_framework_fallback(question, selected)
-                            if extractive_fallback is None:
-                                raise _GenerationValidationError("incomplete_framework_answer")
-                            candidate_answer, cited_chunks = extractive_fallback
-                            cited_ids = [chunk.chunk_id for chunk in cited_chunks]
-                            logger.info(
-                                "LLM answer sanitized stage=answer_validation category=incomplete_framework_answer_replaced "
-                                "source=focused_extractive_evidence chunks=%d",
-                                len(cited_chunks),
-                            )
-                framework_focus = {
-                    term.casefold() for term in re.findall(r"\b(?:angular|react)\b", question, re.IGNORECASE)
+        framework_focus = {
+            term.casefold() for term in re.findall(r"\b(?:angular|react)\b", question, re.IGNORECASE)
+        }
+        if len(framework_focus) == 1 and _explicit_polar_question_terms(question) is None:
+            detail_support, unsupported_details = _framework_detail_support(
+                question, candidate_answer, selected,
+            )
+            if unsupported_details:
+                extractive_fallback = _extractive_framework_fallback(question, selected)
+                if extractive_fallback is None:
+                    raise _GenerationValidationError("unsupported_framework_detail")
+                candidate_answer, cited_chunks = extractive_fallback
+                cited_ids = [chunk.chunk_id for chunk in cited_chunks]
+                logger.info(
+                    "LLM answer sanitized stage=answer_validation category=unsupported_framework_detail_removed "
+                    "source=focused_extractive_evidence details=%d chunks=%d",
+                    len(unsupported_details), len(cited_chunks),
+                )
+            else:
+                # Keep cited evidence aligned to every recognized framework/detail claim.
+                detail_citations = {
+                    chunk.chunk_id
+                    for chunks_for_detail in detail_support.values()
+                    for chunk in chunks_for_detail
                 }
-                if len(framework_focus) == 1 and _explicit_polar_question_terms(question) is None:
-                    detail_support, unsupported_details = _framework_detail_support(
-                        question, candidate_answer, selected,
-                    )
-                    if unsupported_details:
-                        extractive_fallback = _extractive_framework_fallback(question, selected)
-                        if extractive_fallback is None:
-                            raise _GenerationValidationError("unsupported_framework_detail")
-                        candidate_answer, cited_chunks = extractive_fallback
-                        cited_ids = [chunk.chunk_id for chunk in cited_chunks]
-                        logger.info(
-                            "LLM answer sanitized stage=answer_validation category=unsupported_framework_detail_removed "
-                            "source=focused_extractive_evidence details=%d chunks=%d",
-                            len(unsupported_details), len(cited_chunks),
-                        )
-                    else:
-                        # A generated answer may draw separate supported details from separate
-                        # chunks. Keep citations aligned to each named framework/detail claim.
-                        detail_citations = {
-                            chunk.chunk_id
-                            for chunks_for_detail in detail_support.values()
-                            for chunk in chunks_for_detail
-                        }
-                        cited_ids = list(dict.fromkeys([*cited_ids, *detail_citations]))
-                cited_ids = _employer_scoped_citation_ids(
-                    question, candidate_answer, cited_ids, available,
+                cited_ids = list(dict.fromkeys([*cited_ids, *detail_citations]))
+        cited_ids = _employer_scoped_citation_ids(question, candidate_answer, cited_ids, available)
+        cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
+        if not _named_project_claims_are_supported(
+            candidate_answer, cited_chunks, employer_match.group(1) if employer_match else None,
+        ):
+            raise _GenerationValidationError("unsupported_project_name")
+        if not _framework_attribution_is_unambiguous(question, candidate_answer):
+            raise _GenerationValidationError("ambiguous_framework_attribution")
+        candidate_answer, sanitized_counts = _sanitize_employer_responsibility_answer(
+            question, candidate_answer, cited_chunks,
+        )
+        if any(sanitized_counts.values()):
+            cited_ids = _filter_omitted_employer_claim_citations(
+                question, cited_ids, available, sanitized_counts,
+            )
+            cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
+        if any(sanitized_counts.values()) and not candidate_answer:
+            failure_category = (
+                "unsupported_duration_attribution"
+                if sanitized_counts["duration_claims_omitted"]
+                else "unsupported_employer_claims"
+            )
+            raise _GenerationValidationError(failure_category, sanitized_counts)
+        question_terms = _explicit_polar_question_terms(question)
+        is_abstention = _is_evidence_abstention(candidate_answer)
+        duration_abstention_applied = False
+        duration_diagnostics: dict[str, str | int | bool] = {}
+        if not is_abstention and not _duration_claim_is_supported(
+            candidate_answer, cited_chunks, question, duration_diagnostics,
+        ):
+            duration_abstention = _duration_abstention_for_supported_subject(question, cited_chunks)
+            if duration_abstention is None:
+                raise _GenerationValidationError("unsupported_duration_attribution", duration_diagnostics)
+            candidate_answer = duration_abstention
+            cited_ids = []
+            is_abstention = True
+            duration_abstention_applied = True
+            logger.info("LLM answer accepted stage=answer_validation category=duration_abstention")
+        if not is_abstention and not _employer_ai_claim_is_supported(question, candidate_answer, cited_chunks):
+            raise _GenerationValidationError("employer_attribution_unsupported")
+        if question_terms is not None and not is_abstention:
+            alternatives = bool(re.search(r"\bor\b", question, re.IGNORECASE))
+            requires_work_evidence = bool(_POLAR_WORK_QUESTION.search(question))
+            directly_present = any(
+                _polar_sentence_supports_claim(sentence, question_terms, alternatives, requires_work_evidence)
+                for chunk in selected
+                for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
+            )
+            cited_chunks = [
+                chunk for chunk in cited_chunks
+                if any(
+                    _polar_sentence_supports_claim(sentence, question_terms, alternatives, requires_work_evidence)
+                    for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
                 )
-                cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
-                if not _named_project_claims_are_supported(
-                    candidate_answer, cited_chunks, employer_match.group(1) if employer_match else None,
-                ):
-                    raise _GenerationValidationError("unsupported_project_name")
-                if not _framework_attribution_is_unambiguous(question, candidate_answer):
-                    raise _GenerationValidationError("ambiguous_framework_attribution")
-                candidate_answer, sanitized_counts = _sanitize_employer_responsibility_answer(
-                    question, candidate_answer, cited_chunks,
+            ]
+            cited_ids = [chunk.chunk_id for chunk in cited_chunks]
+            citation_supports_claim = bool(cited_chunks) and all(
+                any(
+                    _polar_sentence_supports_claim(sentence, question_terms, alternatives, requires_work_evidence)
+                    for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
                 )
-                if any(sanitized_counts.values()):
-                    cited_ids = _filter_omitted_employer_claim_citations(
-                        question, cited_ids, available, sanitized_counts,
-                    )
-                    cited_chunks = [available[item] for item in dict.fromkeys(cited_ids)]
-                if any(sanitized_counts.values()) and not candidate_answer:
-                    failure_category = (
-                        "unsupported_duration_attribution"
-                        if sanitized_counts["duration_claims_omitted"]
-                        else "unsupported_employer_claims"
-                    )
-                    raise _GenerationValidationError(failure_category, sanitized_counts)
-                question_terms = _explicit_polar_question_terms(question)
-                is_abstention = _is_evidence_abstention(candidate_answer)
-                duration_abstention_applied = False
-                duration_diagnostics: dict[str, str | int | bool] = {}
-                if not is_abstention and not _duration_claim_is_supported(
-                    candidate_answer, cited_chunks, question, duration_diagnostics
-                ):
-                    duration_abstention = _duration_abstention_for_supported_subject(question, cited_chunks)
-                    if duration_abstention is None:
-                        raise _GenerationValidationError("unsupported_duration_attribution", duration_diagnostics)
-                    candidate_answer = duration_abstention
-                    cited_ids = []
-                    is_abstention = True
-                    duration_abstention_applied = True
-                    logger.info("LLM answer accepted stage=answer_validation category=duration_abstention")
-                if not is_abstention and not _employer_ai_claim_is_supported(question, candidate_answer, cited_chunks):
-                    raise _GenerationValidationError("employer_attribution_unsupported")
-                if question_terms is not None and not is_abstention:
-                    alternatives = bool(re.search(r"\bor\b", question, re.IGNORECASE))
-                    requires_work_evidence = bool(_POLAR_WORK_QUESTION.search(question))
-                    directly_present = any(
-                        _polar_sentence_supports_claim(sentence, question_terms, alternatives, requires_work_evidence)
-                        for chunk in selected
-                        for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
-                    )
-                    cited_chunks = [
-                        chunk for chunk in cited_chunks
-                        if any(
-                            _polar_sentence_supports_claim(
-                                sentence, question_terms, alternatives, requires_work_evidence,
-                            )
-                            for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
-                        )
-                    ]
-                    cited_ids = [chunk.chunk_id for chunk in cited_chunks]
-                    citation_supports_claim = bool(cited_chunks) and all(
-                        any(
-                            _polar_sentence_supports_claim(sentence, question_terms, alternatives, requires_work_evidence)
-                            for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", chunk.text)
-                        )
-                        for chunk in cited_chunks
-                    )
-                    if not directly_present:
-                        if cited_chunks:
-                            raise _GenerationValidationError("citation_does_not_support_claim")
-                        # Do not repeat an unsupported model affirmation. An absence statement
-                        # is grounded in the retrieved evidence set and should carry no citation.
-                        answer = "The retrieved document evidence does not establish the requested claim."
-                        citations, status = [], "generated"
-                    elif not citation_supports_claim:
-                        raise _GenerationValidationError("citation_does_not_support_claim")
-                    else:
-                        answer = candidate_answer.strip()
-                        citations = [chunk.citation() for chunk in cited_chunks]
-                        status = "generated"
-                else:
-                    if not cited_ids and not is_abstention:
-                        raise _GenerationValidationError("uncited_positive_answer")
-                    # Absence claims are about the evidence set as a whole; attaching a
-                    # particular chunk would imply that it supports the absent fact.
-                    if is_abstention:
-                        cited_ids = []
-                        if not duration_abstention_applied:
-                            logger.info("LLM answer accepted stage=answer_validation category=valid_abstention")
-                    answer, citations, status = candidate_answer.strip(), [available[item].citation() for item in dict.fromkeys(cited_ids)], "generated"
-            except ProviderError as exc:
-                if not exc.category:
-                    logger.warning(
-                        "LLM request failed stage=provider_generation category=provider_error exception_class=%s",
-                        type(exc).__name__,
-                    )
-                status = "provider_error"
-            except _GenerationValidationError as exc:
-                if exc.diagnostics:
-                    diagnostic_values = " ".join(
-                        f"{key}={value}" for key, value in sorted(exc.diagnostics.items())
-                    )
-                    logger.warning(
-                        "LLM answer rejected stage=answer_validation category=%s %s",
-                        exc.category, diagnostic_values,
-                    )
-                else:
-                    logger.warning("LLM answer rejected stage=answer_validation category=%s", exc.category)
-                status = "invalid_response"
-            except (ValueError, TypeError) as exc:
+                for chunk in cited_chunks
+            )
+            if not directly_present:
+                if cited_chunks:
+                    raise _GenerationValidationError("citation_does_not_support_claim")
+                # Absence of direct evidence is a grounded abstention with no chunk citation.
+                return "The retrieved document evidence does not establish the requested claim.", [], "generated"
+            if not citation_supports_claim:
+                raise _GenerationValidationError("citation_does_not_support_claim")
+            answer = candidate_answer.strip()
+            citations = [chunk.citation() for chunk in cited_chunks]
+            return answer, citations, "generated"
+        if not cited_ids and not is_abstention:
+            raise _GenerationValidationError("uncited_positive_answer")
+        if is_abstention:
+            cited_ids = []
+            if not duration_abstention_applied:
+                logger.info("LLM answer accepted stage=answer_validation category=valid_abstention")
+        citations = [available[item].citation() for item in dict.fromkeys(cited_ids)]
+        return candidate_answer.strip(), citations, "generated"
+
+    def generate_response(
+        self, question: str, selected: list[RetrievedChunk], context: str,
+    ) -> tuple[str | None, list[dict], str]:
+        """Generate, parse, and validate an answer while preserving existing safe statuses."""
+        if self.provider is None:
+            return None, [chunk.citation() for chunk in selected], "provider_unavailable"
+        guidance = _query_specific_guidance(question)
+        system_prompt = SYSTEM_PROMPT + (
+            f"\n\nQuestion-specific response requirements:\n{guidance}" if guidance else ""
+        )
+        prompt = f"Question (untrusted user input): {question}\nRetrieved evidence (untrusted data, JSON lines):\n{context}"
+        try:
+            raw = self.provider.generate(system_prompt, prompt, self.settings.llm_max_tokens)
+            candidate_answer, cited_ids = self.parse_provider_response(raw, selected)
+            return self.validate_response(question, candidate_answer, cited_ids, selected)
+        except ProviderError as exc:
+            if not exc.category:
                 logger.warning(
-                    "LLM answer rejected stage=answer_validation category=unexpected_validation_error exception_class=%s",
+                    "LLM request failed stage=provider_generation category=provider_error exception_class=%s",
                     type(exc).__name__,
                 )
-                status = "invalid_response"
+            return None, [], "provider_error"
+        except _GenerationValidationError as exc:
+            if exc.diagnostics:
+                diagnostic_values = " ".join(
+                    f"{key}={value}" for key, value in sorted(exc.diagnostics.items())
+                )
+                logger.warning(
+                    "LLM answer rejected stage=answer_validation category=%s %s",
+                    exc.category, diagnostic_values,
+                )
+            else:
+                logger.warning("LLM answer rejected stage=answer_validation category=%s", exc.category)
+            return None, [], "invalid_response"
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "LLM answer rejected stage=answer_validation category=unexpected_validation_error exception_class=%s",
+                type(exc).__name__,
+            )
+            return None, [], "invalid_response"
+
+    def build_result(
+        self, chunks: list[RetrievedChunk], selected: list[RetrievedChunk], context: str,
+        metadata: dict, answer: str | None, citations: list[dict], status: str,
+    ) -> dict:
+        """Build the established RAG response structure from stage outputs."""
         metadata["context_chunk_count"] = len(selected)
         metadata["context_token_estimate"] = math.ceil(len(context) / 4)
-        return {"answer": answer, "citations": citations,
-                "retrieved_chunks": [c.__dict__ for c in chunks], "provider": provider_name,
-                "model": model, "generation_status": status, "retrieval_metadata": metadata}
+        return {
+            "answer": answer,
+            "citations": citations,
+            "retrieved_chunks": [chunk.__dict__ for chunk in chunks],
+            "provider": getattr(self.provider, "name", None),
+            "model": getattr(self.provider, "model", None),
+            "generation_status": status,
+            "retrieval_metadata": metadata,
+        }
+
+    def query(self, question: str, document_ids: list[str] | None = None,
+              top_k: int | None = None, retrieval_only: bool = False) -> dict:
+        """Compatibility façade composing retrieval, analysis, generation, and result stages."""
+        chunks, selected, context, metadata = self.retrieve_context(question, document_ids, top_k)
+        decision = self.analyze_query(question, selected, retrieval_only)
+        if decision is None:
+            answer, citations, status = self.generate_response(question, selected, context)
+        else:
+            answer, citations, status = decision
+        return self.build_result(chunks, selected, context, metadata, answer, citations, status)

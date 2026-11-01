@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 from datetime import datetime, timezone
 
@@ -8,10 +9,31 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.models.conversation import ChatMessage, Conversation
 from app.schemas.chat import ConversationRead, QueryRequest, QueryResponse
-from app.services.rag.factory import get_rag_pipeline
+from app.services.rag.factory import get_rag_graph, get_rag_pipeline
+from app.services.rag.graph import RAGGraphStageError
 from app.services.rag.pipeline import RAGPipeline
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
+
+
+def _execute_query(pipeline: RAGPipeline, request: QueryRequest, *, retrieval_only: bool = False) -> dict:
+    document_ids = [str(item) for item in request.document_ids] if request.document_ids else None
+    if pipeline.settings.rag_execution_mode == "langgraph":
+        state = get_rag_graph(pipeline).invoke({
+            "question": request.question,
+            "document_ids": document_ids,
+            "top_k": request.top_k,
+            "retrieval_only": retrieval_only,
+        })
+        return state["final_result"]
+    if retrieval_only:
+        return pipeline.query(request.question, document_ids, request.top_k, retrieval_only=True)
+    return pipeline.query(request.question, document_ids, request.top_k)
+
+
+def _log_graph_failure(exc: RAGGraphStageError) -> None:
+    logger.error("RAG graph execution failed stage=%s category=%s", exc.stage, exc.category)
 
 
 def _persist(db: Session, result: dict, request: QueryRequest) -> UUID:
@@ -43,8 +65,10 @@ def _persist(db: Session, result: dict, request: QueryRequest) -> UUID:
 def query(request: QueryRequest, db: Session = Depends(get_db),
           pipeline: RAGPipeline = Depends(get_rag_pipeline)) -> QueryResponse:
     try:
-        result = pipeline.query(request.question, [str(i) for i in request.document_ids] if request.document_ids else None,
-                                request.top_k)
+        result = _execute_query(pipeline, request)
+    except RAGGraphStageError as exc:
+        _log_graph_failure(exc)
+        raise HTTPException(status_code=503, detail="Query processing is temporarily unavailable") from None
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Query processing is temporarily unavailable") from exc
     conversation_id = _persist(db, result, request)
@@ -54,8 +78,10 @@ def query(request: QueryRequest, db: Session = Depends(get_db),
 @router.post("/retrieve", response_model=QueryResponse)
 def retrieve(request: QueryRequest, pipeline: RAGPipeline = Depends(get_rag_pipeline)) -> QueryResponse:
     try:
-        result = pipeline.query(request.question, [str(i) for i in request.document_ids] if request.document_ids else None,
-                                request.top_k, retrieval_only=True)
+        result = _execute_query(pipeline, request, retrieval_only=True)
+    except RAGGraphStageError as exc:
+        _log_graph_failure(exc)
+        raise HTTPException(status_code=503, detail="Retrieval is temporarily unavailable") from None
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Retrieval is temporarily unavailable") from exc
     return QueryResponse(conversation_id=None, **result)

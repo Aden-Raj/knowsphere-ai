@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     rag_top_k: int = Field(default=5, ge=1, le=50)
     rag_min_relevance: float = Field(default=0.20, ge=0, le=1)
     rag_context_token_budget: int = Field(default=4000, ge=128, le=100000)
+    rag_execution_mode: Literal["legacy", "langgraph"] = "legacy"
     llm_provider: Literal["none", "ollama", "openai_compatible"] = "none"
     llm_model: str | None = None
     ollama_base_url: str = "http://localhost:11434"

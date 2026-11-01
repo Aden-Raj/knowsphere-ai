@@ -139,6 +139,70 @@ def test_semantic_retrieval_and_document_filter():
     assert metadata["candidate_count"] == 1
 
 
+def test_retrieve_context_stage_returns_ranked_and_budgeted_evidence():
+    did = str(uuid4())
+    row = record(did, "Revenue grew by 15%.")
+    p, _ = pipeline([row])
+
+    ranked, selected, context, metadata = p.retrieve_context("What happened to revenue?", [did])
+
+    assert [chunk.chunk_id for chunk in ranked] == [row["id"]]
+    assert [chunk.chunk_id for chunk in selected] == [row["id"]]
+    assert row["id"] in context
+    assert metadata["candidate_count"] == 1
+
+
+def test_analyze_query_stage_preserves_early_route_results():
+    row = record(str(uuid4()))
+    p, _ = pipeline([row])
+    chunks, _ = p.retrieve("What does the document say?")
+    selected, _ = p.assemble_context(chunks)
+
+    no_evidence = p.analyze_query("What does the document say?", [])
+    retrieval_only = p.analyze_query("What does the document say?", selected, retrieval_only=True)
+    provider_unavailable = p.analyze_query("What does the document say?", selected)
+
+    assert no_evidence == (None, [], "no_evidence")
+    assert retrieval_only == (None, [selected[0].citation()], "retrieval_only")
+    assert provider_unavailable == (None, [selected[0].citation()], "provider_unavailable")
+
+
+def test_query_compatibility_facade_delegates_stages_in_order(monkeypatch):
+    p, _ = pipeline([])
+    chunks, selected, context, metadata = [], [], "context", {"candidate_count": 0}
+    events = []
+
+    def retrieve_context(question, document_ids, top_k):
+        events.append(("retrieve", question, document_ids, top_k))
+        return chunks, selected, context, metadata
+
+    def analyze_query(question, selected_chunks, retrieval_only):
+        events.append(("analyze", question, selected_chunks, retrieval_only))
+        return None
+
+    def generate_response(question, selected_chunks, assembled_context):
+        events.append(("generate", question, selected_chunks, assembled_context))
+        return "grounded answer", [], "generated"
+
+    def build_result(*args):
+        events.append(("build", *args))
+        return {"answer": args[4], "generation_status": args[6]}
+
+    monkeypatch.setattr(p, "retrieve_context", retrieve_context)
+    monkeypatch.setattr(p, "analyze_query", analyze_query)
+    monkeypatch.setattr(p, "generate_response", generate_response)
+    monkeypatch.setattr(p, "build_result", build_result)
+
+    result = p.query("question", ["doc-id"], 3)
+
+    assert result == {"answer": "grounded answer", "generation_status": "generated"}
+    assert [event[0] for event in events] == ["retrieve", "analyze", "generate", "build"]
+    assert events[0] == ("retrieve", "question", ["doc-id"], 3)
+    assert events[-1][1:] == (
+        chunks, selected, context, metadata, "grounded answer", [], "generated",
+    )
+
+
 def test_test_settings_ignore_local_env_and_default_to_no_provider():
     settings = Settings()
     assert settings.llm_provider == "none"
@@ -249,6 +313,113 @@ def test_hybrid_retrieval_preserves_semantic_paraphrases_and_scopes_documents():
 
     assert [chunk.document_id for chunk in chunks] == [wanted]
     assert chunks[0].chunk_id == semantic_chunk["id"]
+
+
+def test_employer_identification_uses_low_relevance_employment_anchors_from_both_resume_versions():
+    old_id, new_id = str(uuid4()), str(uuid4())
+    old_anchor = record(
+        old_id, "PROFESSIONAL EXPERIENCE\nFull Stack Developer\n"
+        "Tata Consultancy Services (TCS)\n2022 - Present\nAngular development.",
+        score=0.08, index=3, page=2,
+    )
+    old_tools = record(old_id, "Worked with Microsoft Azure for application deployment.", score=0.9, index=4)
+    new_anchor = record(
+        new_id, "PROFESSIONAL EXPERIENCE\nSoftware Developer\n"
+        "Tata Consultancy Services (TCS)\n2022 - Present\nREST API development.",
+        score=0.07, index=3, page=2,
+    )
+    new_tools = record(new_id, "Microsoft Azure environments and PostgreSQL.", score=0.88, index=4)
+    p, _ = pipeline([old_anchor, old_tools, new_anchor, new_tools])
+
+    result = p.query("Which company has the candidate worked for?")
+
+    assert result["answer"] == "The candidate has worked for Tata Consultancy Services (TCS)."
+    assert {item["chunk_id"] for item in result["citations"]} == {old_anchor["id"], new_anchor["id"]}
+    assert all("Tata Consultancy Services" in item["quoted_text"] for item in result["citations"])
+    assert "Microsoft Azure" not in result["answer"]
+    assert result["retrieval_metadata"]["employer_identification_scoped"] is True
+
+
+def test_employer_identification_abstains_without_explicit_employment_anchor():
+    did = str(uuid4())
+    vendor = record(did, "Microsoft Azure, React, and PostgreSQL experience.", score=0.9)
+    p, _ = pipeline([vendor])
+
+    result = p.query("Which company has the candidate worked for?")
+
+    assert result["answer"] is None
+    assert result["citations"] == []
+    assert result["generation_status"] == "no_evidence"
+
+
+def test_employer_identification_respects_document_filter():
+    wanted, excluded = str(uuid4()), str(uuid4())
+    wanted_anchor = record(
+        wanted, "PROFESSIONAL EXPERIENCE\nEngineer\nTata Consultancy Services (TCS)\n"
+        "2022 - Present\nDeveloped APIs.", score=0.1, index=0,
+    )
+    excluded_anchor = record(
+        excluded, "PROFESSIONAL EXPERIENCE\nEngineer\nExample Other Company\n"
+        "2020 - 2021\nDeveloped APIs.", score=0.9, index=0,
+    )
+    p, _ = pipeline([wanted_anchor, excluded_anchor])
+
+    result = p.query("Which company has the candidate worked for?", [wanted])
+
+    assert result["citations"]
+    assert {citation["document_id"] for citation in result["citations"]} == {wanted}
+    assert "Tata Consultancy Services" in result["answer"]
+
+
+def test_named_project_techniques_scope_to_section_and_exclude_overlap_noise():
+    did = str(uuid4())
+    overlapping = record(
+        did,
+        "KEY PROJECT EXPERIENCE\nOpenRouter Quiz Application\n"
+        "Technologies: OpenRouter, React, Angular.\n"
+        "KnowSphere AI – Agentic Knowledge Intelligence Platform\n"
+        "Technologies: semantic search, hybrid search, BM25, Python, FastAPI.",
+        score=0.9, index=0, page=3,
+    )
+    continuation = record(
+        did,
+        "KnowSphere AI – Agentic Knowledge Intelligence Platform\n"
+        "Technologies: semantic search, hybrid search, BM25, Python, FastAPI.\n"
+        "Implemented document ingestion, semantic and hybrid search, and BM25 lexical retrieval.\n"
+        "PROFESSIONAL EXPERIENCE\nTCS used Angular and React.",
+        score=0.85, index=1, page=3,
+    )
+    unrelated_profile = record(did, "Skills: OpenRouter, React, Angular.", score=0.8, index=2, page=1)
+    p, _ = pipeline([overlapping, continuation, unrelated_profile])
+
+    result = p.query("Which retrieval techniques are used in KnowSphere AI?")
+
+    assert "semantic search" in result["answer"].casefold()
+    assert "hybrid search" in result["answer"].casefold()
+    assert "bm25" in result["answer"].casefold()
+    assert "lexical retrieval" in result["answer"].casefold()
+    assert all(term not in result["answer"].casefold() for term in ("openrouter", "react", "angular"))
+    assert result["retrieval_metadata"]["named_project_scoped"] is True
+    assert result["retrieved_chunks"]
+    assert all("KnowSphere AI" in item["text"] for item in result["retrieved_chunks"])
+    assert all("OpenRouter Quiz Application" not in item["text"] for item in result["retrieved_chunks"])
+    assert all("PROFESSIONAL EXPERIENCE" not in item["text"] for item in result["retrieved_chunks"])
+    assert all("KnowSphere AI" in citation["quoted_text"] for citation in result["citations"])
+
+
+def test_named_project_question_does_not_fall_back_to_unrelated_chunks_when_section_missing():
+    did = str(uuid4())
+    other_project = record(
+        did, "KEY PROJECT EXPERIENCE\nOpenRouter Quiz Application\n"
+        "Technologies: OpenRouter, React, Angular.", score=0.9,
+    )
+    p, _ = pipeline([other_project])
+
+    result = p.query("Which retrieval techniques are used in KnowSphere AI?")
+
+    assert result["generation_status"] == "no_evidence"
+    assert result["answer"] is None
+    assert result["citations"] == []
 
 
 def test_hybrid_retrieval_deduplicates_candidates_and_rejects_irrelevant_query():

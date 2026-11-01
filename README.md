@@ -147,6 +147,8 @@ Set-Location backend
 
 The API listens at `http://localhost:8000`. Verify liveness at `/api/v1/health` and database readiness at `/api/v1/ready`.
 
+RAG execution uses the legacy `RAGPipeline.query()` path by default. To run the same chat and retrieval requests through the LangGraph workflow, set `RAG_EXECUTION_MODE=langgraph` in `backend/.env` and restart FastAPI. Supported values are `legacy` and `langgraph`; both return the existing API response shape. Switch back with `RAG_EXECUTION_MODE=legacy`.
+
 ### Run backend tests
 
 From the `backend/` directory:
