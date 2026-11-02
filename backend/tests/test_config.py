@@ -44,3 +44,20 @@ def test_rag_execution_mode_rejects_unknown_values_safely(monkeypatch):
         Settings(_env_file=None)
 
     assert "rag_execution_mode" in str(error.value)
+
+
+def test_conversation_history_limits_have_bounded_defaults():
+    settings = Settings(_env_file=None)
+
+    assert settings.conversation_history_max_messages == 10
+    assert settings.conversation_history_max_chars == 8000
+
+
+def test_conversation_history_limits_can_be_configured(monkeypatch):
+    monkeypatch.setenv("CONVERSATION_HISTORY_MAX_MESSAGES", "6")
+    monkeypatch.setenv("CONVERSATION_HISTORY_MAX_CHARS", "4200")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.conversation_history_max_messages == 6
+    assert settings.conversation_history_max_chars == 4200

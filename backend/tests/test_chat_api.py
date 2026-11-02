@@ -1,5 +1,6 @@
 import json
-from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -11,6 +12,15 @@ from app.services.rag.pipeline import ProviderError, RAGPipeline
 class Embedder:
     def embed(self, texts):
         return [[0.1, 0.2] for _ in texts]
+
+
+class TrackingEmbedder(Embedder):
+    def __init__(self):
+        self.queries = []
+
+    def embed(self, texts):
+        self.queries.extend(texts)
+        return super().embed(texts)
 
 
 class Store:
@@ -78,7 +88,9 @@ def test_query_conversation_round_trip_and_delete(api_client, execution_mode, mo
     assert body["citations"][0]["chunk_id"] == store.chunk
     if execution_mode == "langgraph":
         assert graph_inputs == {
-            "question": "Revenue?", "document_ids": [store.doc_id], "top_k": 1,
+            "question": "Revenue?",
+            "resolved_question": "Revenue?", "resolution_status": "standalone",
+            "document_ids": [store.doc_id], "top_k": 1,
             "retrieval_only": False,
         }
     conversation_id = body["conversation_id"]
@@ -204,10 +216,338 @@ def test_legacy_provider_failure_remains_a_persisted_provider_error_response(api
     assert len(detail["messages"]) == 2
 
 
-def test_missing_conversation_on_followup_returns_404(api_client):
+def test_missing_conversation_on_followup_returns_404_before_rag(api_client, monkeypatch):
     client, _, _ = api_client
     from app.api.routes.chat import get_rag_pipeline
     from app.main import app
-    app.dependency_overrides[get_rag_pipeline] = lambda: RAGPipeline(Embedder(), type("Empty", (), {"query": lambda self, e, k, d=None: []})(), Settings())
+    app.dependency_overrides[get_rag_pipeline] = lambda: pytest.fail("pipeline must not be initialized")
+
+    from app.api.routes import chat as chat_route
+    monkeypatch.setattr(chat_route, "_execute_query", lambda *args, **kwargs: pytest.fail("RAG must not run"))
+
     response = client.post("/api/v1/chat/query", json={"question": "x", "conversation_id": str(uuid4())})
+
     assert response.status_code == 404
+
+
+def test_persistence_keeps_original_user_question(api_client):
+    client, _, session_factory = api_client
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: RAGPipeline(
+        Embedder(), type("Empty", (), {"query": lambda self, e, k, d=None: []})(), Settings(),
+    )
+    original_question = "What technologies does that project use?"
+    response = client.post("/api/v1/chat/query", json={"question": original_question})
+
+    assert response.status_code == 200
+    conversation_id = response.json()["conversation_id"]
+    with session_factory() as db:
+        from app.models.conversation import ChatMessage
+        user_message = db.query(ChatMessage).filter_by(
+            conversation_id=UUID(conversation_id), role="user",
+        ).one()
+
+    assert user_message.content == original_question
+
+
+def test_followup_reuses_existing_conversation_and_persists_original_question(api_client):
+    client, _, session_factory = api_client
+    from app.models.conversation import ChatMessage, Conversation
+
+    conversation_id = uuid4()
+    with session_factory() as db:
+        db.add(Conversation(id=conversation_id, title="Project discussion"))
+        db.add_all([
+            ChatMessage(conversation_id=conversation_id, role="user", content="What projects are mentioned?"),
+            ChatMessage(
+                conversation_id=conversation_id,
+                role="assistant",
+                content="The resume mentions two projects: AI-Powered Quiz Generator and KnowSphere AI.",
+                citations=[],
+                generation_status="generated",
+            ),
+        ])
+        db.commit()
+
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: RAGPipeline(
+        Embedder(), type("Empty", (), {"query": lambda self, e, k, d=None: []})(), Settings(),
+    )
+    original_question = "What technologies does that project use?"
+    response = client.post("/api/v1/chat/query", json={
+        "question": original_question,
+        "conversation_id": str(conversation_id),
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["conversation_id"] == str(conversation_id)
+    with session_factory() as db:
+        persisted_conversation = db.get(Conversation, conversation_id)
+        messages = db.query(ChatMessage).filter_by(conversation_id=conversation_id).all()
+        conversation_count = db.query(Conversation).count()
+
+    assert persisted_conversation is not None
+    assert conversation_count == 1
+    assert len(messages) == 4
+    assert any(message.role == "user" and message.content == original_question for message in messages)
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy", "langgraph"])
+def test_standalone_question_uses_original_query_in_both_modes(api_client, execution_mode, monkeypatch):
+    client, _, _ = api_client
+    embedder = TrackingEmbedder()
+    settings = Settings()
+    settings.rag_execution_mode = execution_mode
+    pipeline = RAGPipeline(embedder, type("Empty", (), {"query": lambda self, e, k, d=None: []})(), settings)
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    from app.api.routes import chat as chat_route
+    monkeypatch.setattr(
+        chat_route, "load_recent_conversation_history",
+        lambda *args, **kwargs: pytest.fail("new conversations must not load history"),
+    )
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+    question = "Which technical skills appear in the document?"
+
+    response = client.post("/api/v1/chat/query", json={"question": question})
+
+    assert response.status_code == 200, response.text
+    assert embedder.queries == [question]
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy", "langgraph"])
+def test_resolved_followup_query_reaches_retrieval_in_both_modes(api_client, execution_mode):
+    client, _, session_factory = api_client
+    from app.models.conversation import ChatMessage, Conversation
+
+    conversation_id = uuid4()
+    with session_factory() as db:
+        db.add(Conversation(id=conversation_id, title="Project discussion"))
+        db.add(ChatMessage(
+            conversation_id=conversation_id,
+            role="assistant",
+            content="The project is KnowSphere AI.",
+            citations=[],
+            generation_status="generated",
+        ))
+        db.commit()
+
+    embedder = TrackingEmbedder()
+    settings = Settings()
+    settings.rag_execution_mode = execution_mode
+    pipeline = RAGPipeline(embedder, type("Empty", (), {"query": lambda self, e, k, d=None: []})(), settings)
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+    original_question = "What technologies does that project use?"
+
+    response = client.post("/api/v1/chat/query", json={
+        "question": original_question,
+        "conversation_id": str(conversation_id),
+    })
+
+    assert response.status_code == 200, response.text
+    assert embedder.queries == ["What technologies does KnowSphere AI use?"]
+    detail = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert any(message["role"] == "user" and message["content"] == original_question
+               for message in detail["messages"])
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy", "langgraph"])
+def test_ambiguous_followup_abstains_without_retrieval_or_generation(api_client, execution_mode):
+    client, _, session_factory = api_client
+    from app.models.conversation import ChatMessage, Conversation
+
+    conversation_id = uuid4()
+    with session_factory() as db:
+        db.add(Conversation(id=conversation_id, title="Skills discussion"))
+        db.add(ChatMessage(
+            conversation_id=conversation_id,
+            role="assistant",
+            content="Skills: Angular Material and React Hooks.",
+            citations=[],
+            generation_status="generated",
+        ))
+        db.commit()
+
+    embedder = TrackingEmbedder()
+    settings = Settings()
+    settings.rag_execution_mode = execution_mode
+
+    class NoRetrievalStore:
+        def query(self, embedding, top_k, document_ids=None):
+            pytest.fail("ambiguous reference must not retrieve")
+
+    class NoGenerationProvider:
+        name, model = "test", "unused"
+
+        def generate(self, system_prompt, user_prompt, max_tokens):
+            pytest.fail("ambiguous reference must not generate")
+
+    pipeline = RAGPipeline(embedder, NoRetrievalStore(), settings, NoGenerationProvider())
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+    question = "What does the second one use?"
+
+    response = client.post("/api/v1/chat/query", json={
+        "question": question,
+        "conversation_id": str(conversation_id),
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["generation_status"] == "no_evidence"
+    assert response.json()["citations"] == []
+    assert response.json()["answer"] == "I couldn't determine what you're referring to. Could you clarify?"
+    assert embedder.queries == []
+    detail = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert any(message["role"] == "user" and message["content"] == question for message in detail["messages"])
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy", "langgraph"])
+def test_clarification_continuity_rewrites_reply_using_fresh_retrieval(api_client, execution_mode):
+    client, _, session_factory = api_client
+    from app.models.conversation import ChatMessage, Conversation
+
+    conversation_id = uuid4()
+    with session_factory() as db:
+        db.add(Conversation(id=conversation_id, title="Project discussion"))
+        db.add(ChatMessage(
+            conversation_id=conversation_id,
+            role="assistant",
+            content="The resume includes AI-Powered Quiz Generator and KnowSphere AI.",
+            citations=[],
+            generation_status="generated",
+        ))
+        db.commit()
+
+    first_question = "Which of those projects uses RAG?"
+    first = client.post("/api/v1/chat/query", json={
+        "question": first_question,
+        "conversation_id": str(conversation_id),
+    })
+    assert first.status_code == 200, first.text
+    assert first.json()["generation_status"] == "no_evidence"
+    assert first.json()["answer"] == "I couldn't determine what you're referring to. Could you clarify?"
+
+    embedder = TrackingEmbedder()
+    settings = Settings()
+    settings.rag_execution_mode = execution_mode
+    pipeline = RAGPipeline(embedder, type("Empty", (), {"query": lambda self, e, k, d=None: []})(), settings)
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+    clarification_reply = "I mean KnowSphere AI."
+    second = client.post("/api/v1/chat/query", json={
+        "question": clarification_reply,
+        "conversation_id": str(conversation_id),
+    })
+
+    assert second.status_code == 200, second.text
+    assert embedder.queries == ["Does KnowSphere AI use RAG?"]
+    detail = client.get(f"/api/v1/chat/conversations/{conversation_id}").json()
+    assert len(detail["messages"]) == 5
+    assert detail["messages"][1]["role"] == "user"
+    assert detail["messages"][1]["content"] == first_question
+    assert detail["messages"][2]["generation_status"] == "clarification"
+    assert detail["messages"][2]["provider"] is None
+    assert detail["messages"][3]["role"] == "user"
+    assert detail["messages"][3]["content"] == clarification_reply
+    assert len(client.get("/api/v1/chat/conversations").json()) == 1
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy", "langgraph"])
+def test_followup_history_is_not_evidence_and_old_citations_are_not_reused(api_client, execution_mode):
+    client, _, session_factory = api_client
+    from app.models.conversation import ChatMessage, Conversation
+
+    conversation_id = uuid4()
+    old_chunk_id, current_chunk_id = str(uuid4()), str(uuid4())
+    document_id = str(uuid4())
+    with session_factory() as db:
+        db.add(Conversation(id=conversation_id, title="Project discussion"))
+        base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        db.add_all([
+            ChatMessage(
+                conversation_id=conversation_id,
+                role="assistant",
+                content="The project is KnowSphere AI. Private previous claim must not be evidence.",
+                citations=[{"document_id": str(uuid4()), "chunk_id": old_chunk_id, "quoted_text": "old source"}],
+                generation_status="generated",
+                created_at=base_time,
+            ),
+            ChatMessage(
+                conversation_id=conversation_id,
+                role="user",
+                content="Tell me more about that project.",
+                created_at=base_time + timedelta(seconds=1),
+            ),
+            ChatMessage(
+                conversation_id=conversation_id,
+                role="assistant",
+                content="I couldn't determine what you're referring to. Could you clarify?",
+                citations=[],
+                generation_status="clarification",
+                created_at=base_time + timedelta(seconds=2),
+            ),
+        ])
+        db.commit()
+
+    row = {
+        "id": current_chunk_id,
+        "text": "KEY PROJECT EXPERIENCE\nProject: KnowSphere AI\nKnowSphere AI uses Python and FastAPI for its backend.",
+        "distance": 0.1,
+        "metadata": {
+            "document_id": document_id,
+            "chunk_id": current_chunk_id,
+            "chunk_index": 0,
+            "source_filename": "architecture.txt",
+            "page_number": 1,
+        },
+    }
+
+    class CurrentEvidenceStore:
+        def query(self, embedding, top_k, document_ids=None):
+            return [row]
+
+        def lexical_query(self, query, top_k, document_ids=None):
+            return [row]
+
+        def get_document_chunks(self, requested_document_id):
+            return [row] if requested_document_id == document_id else []
+
+    class EvidenceProvider:
+        name, model = "test", "deterministic"
+
+        def __init__(self):
+            self.prompt = None
+
+        def generate(self, system_prompt, user_prompt, max_tokens):
+            self.prompt = user_prompt
+            return json.dumps({
+                "answer": "KnowSphere AI uses Python and FastAPI for its backend.",
+                "citation_chunk_ids": [current_chunk_id],
+            })
+
+    provider = EvidenceProvider()
+    settings = Settings()
+    settings.rag_execution_mode = execution_mode
+    pipeline = RAGPipeline(Embedder(), CurrentEvidenceStore(), settings, provider)
+    from app.api.routes.chat import get_rag_pipeline
+    from app.main import app
+    app.dependency_overrides[get_rag_pipeline] = lambda: pipeline
+
+    response = client.post("/api/v1/chat/query", json={
+        "question": "I mean KnowSphere AI.",
+        "conversation_id": str(conversation_id),
+    })
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [citation["chunk_id"] for citation in body["citations"]] == [current_chunk_id]
+    assert old_chunk_id not in {citation["chunk_id"] for citation in body["citations"]}
+    assert "Private previous claim must not be evidence" not in provider.prompt
+    assert "old source" not in provider.prompt
+    assert all(chunk["chunk_id"] == current_chunk_id for chunk in body["retrieved_chunks"])

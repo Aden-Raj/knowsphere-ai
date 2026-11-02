@@ -8,6 +8,14 @@
   <meta name="theme-color" content="#0b1012">
   <meta name="description" content="Explore and understand your knowledge with KnowSphere AI.">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <script>
+    try {
+      const theme = localStorage.getItem('knowsphere-theme');
+      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    } catch {
+      // The default dark theme is already provided by the root stylesheet.
+    }
+  </script>
 </head>
 <body>
   <app-root></app-root>

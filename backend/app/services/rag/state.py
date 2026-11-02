@@ -1,8 +1,31 @@
 """Typed state passed between KnowSphere's LangGraph RAG nodes."""
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from app.services.rag.pipeline import RetrievedChunk
+
+TaskType = Literal["direct", "research", "comparison", "synthesis"]
+
+
+class PlannedQuery(TypedDict):
+    query: str
+    subject: str | None
+    aspect: str
+
+
+class TaskEvidence(TypedDict):
+    query: str
+    subject: str | None
+    aspect: str
+    chunk_ids: list[str]
+
+
+class EvidenceCoverage(TypedDict):
+    sufficient: bool
+    covered_aspects: list[str]
+    missing_aspects: list[str]
+    evidence_counts: dict[str, int]
+    adjustment_recommended: bool
 
 
 class QueryAnalysisResult(TypedDict):
@@ -17,6 +40,14 @@ class RAGGraphState(TypedDict, total=False):
     """Per-invocation data only; never contains sessions, providers, or secrets."""
 
     question: str
+    resolved_question: str
+    resolution_status: str
+    task_type: TaskType
+    subqueries: list[PlannedQuery]
+    adjustment_queries: list[PlannedQuery]
+    task_evidence: list[TaskEvidence]
+    retrieval_round: int
+    evidence_coverage: EvidenceCoverage
     document_ids: list[str] | None
     top_k: int | None
     retrieval_only: bool

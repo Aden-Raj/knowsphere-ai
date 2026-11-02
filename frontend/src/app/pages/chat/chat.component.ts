@@ -180,11 +180,12 @@ export class ChatComponent implements OnInit {
 
   private fromStoredMessage(message: ChatMessageRecord): DisplayMessage {
     const assistant = message.role === 'assistant';
+    const clarification = message.generation_status === 'clarification';
     return {
       id: message.id,
       role: assistant ? 'assistant' : 'user',
-      content: !assistant || message.generation_status === 'generated' ? message.content : null,
-      answerBlocks: assistant && message.generation_status === 'generated' ? parseChatAnswer(message.content) : [],
+      content: !assistant || message.generation_status === 'generated' || clarification ? message.content : null,
+      answerBlocks: assistant && (message.generation_status === 'generated' || clarification) ? parseChatAnswer(message.content) : [],
       citations: message.citations || [],
       evidence: [],
       generationStatus: message.generation_status,

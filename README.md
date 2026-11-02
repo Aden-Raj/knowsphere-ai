@@ -2,128 +2,177 @@
 
 **KnowSphere AI – Agentic Knowledge Intelligence Platform**
 
-*Transform documents into intelligence.*
+_Transform documents into intelligence._
 
-KnowSphere AI is an AI-powered enterprise knowledge intelligence platform that enables users to ingest, organize, search, understand, and analyze information using Retrieval-Augmented Generation (RAG) and Agentic AI.
+KnowSphere AI is an AI-powered knowledge platform for ingesting and organizing documents, searching their content, and answering questions with retrieved evidence and source citations. It combines document processing, hybrid Retrieval-Augmented Generation (RAG), bounded LangGraph workflows, and deterministic conversational follow-up resolution.
 
-The platform combines document intelligence, semantic search, contextual question answering, multi-document analysis, and autonomous AI workflows to transform unstructured information into actionable insights.
+## Problem and approach
 
-## Platform architecture
+Enterprise knowledge is often spread across long, unstructured documents. Finding a precise answer can require repeated manual searches and makes it difficult to verify where an answer came from. KnowSphere AI provides a document workspace and retrieves source passages for answers, keeping citations visible so users can inspect the underlying evidence.
 
-KnowSphere AI separates the user experience, API and orchestration services, relational records, and vector retrieval so each layer can evolve independently.
+## Navigation
+
+- [Implemented capabilities](#what-is-implemented)
+- [Architecture](#architecture)
+- [Request paths](#request-paths)
+- [API](#api)
+- [Local development](#local-development)
+- [Demo guide](DEMO.md)
+- [Application screenshots](#application-screenshots)
+- [Limitations](#security-and-known-limitations)
+
+## What is implemented
+
+- Upload and process PDF, DOCX, TXT, and Markdown files. Extraction supports text-based documents; OCR for scanned pages is not implemented.
+- Track document status and metadata in PostgreSQL. Extracted chunks are embedded locally with Sentence Transformers and stored in persistent ChromaDB.
+- Search with semantic retrieval and BM25 lexical retrieval, combined using Reciprocal Rank Fusion (RRF). Retrieval supports document filters, relevance thresholds, and bounded context selection.
+- Ask questions using an optional Ollama or OpenAI-compatible provider. Answers include citations to retrieved chunks; when generation is unavailable or evidence is insufficient, the API returns the corresponding safe status/evidence response.
+- Save conversations and messages in PostgreSQL. A bounded history loader and deterministic resolver can clarify clear follow-up references. History is used only to resolve the query; prior answers are not evidence.
+- Choose the legacy RAG execution path or the LangGraph path through `RAG_EXECUTION_MODE`. LangGraph classifies tasks as direct, research, comparison, or synthesis. Direct questions retain the lightweight existing RAG flow. Complex tasks use deterministic query decomposition (up to three initial retrieval queries), aggregate current-request evidence, evaluate retrieval coverage, and allow at most one targeted adjustment round of up to three queries before generation or safe partial handling.
+- Manage documents, chat, saved conversations, and settings through the Angular application.
+
+Coverage evaluation is a retrieval-coverage heuristic. It is not a general semantic fact verifier and does not guarantee factual correctness. Existing citation and claim safeguards validate supported categories of output, but cannot prove every possible natural-language claim.
+
+## Application Screenshots
+
+![Workspace Dashboard](screenshots/01-dashboard.png)
+
+*Workspace Dashboard*
+
+![Knowledge Base and Document Ingestion](screenshots/02-knowledge-base.png)
+
+*Knowledge Base and Document Ingestion*
+
+![AI Chat – Empty State](screenshots/03-ai-chat-empty-state.png)
+
+*AI Chat – Empty State*
+
+![AI-Generated Answer with Source Citations](screenshots/04-ai-chat-answer-with-citations.png)
+
+*AI-Generated Answer with Source Citations*
+
+![Conversation History](screenshots/05-conversation-history.png)
+
+*Conversation History*
+
+![Hybrid Retrieval Demonstration](screenshots/06-retrieval-techniques-demo.png)
+
+*Hybrid Retrieval Demonstration*
+
+## Architecture
 
 ```mermaid
-flowchart LR
-    U[Users and workspace administrators] --> FE[Angular 21 frontend]
-    FE --> API[FastAPI API]
-    API --> AUTH[Identity and authorization]
-    API --> PG[(PostgreSQL<br/>users, access, metadata, jobs)]
-    API --> ING[Document processing pipeline]
-    ING --> PARSE[Extraction, normalization, chunking]
-    PARSE --> EMB[Sentence Transformers embeddings]
-    EMB --> CH[(ChromaDB<br/>vectors and chunk metadata)]
-    API --> GRAPH[LangGraph agent orchestration]
-    GRAPH --> RET[LlamaIndex retrieval and RAG]
-    RET --> CH
-    GRAPH --> LLM[Ollama or configured LLM API]
-    LLM --> GRAPH
-    GRAPH --> API
+flowchart TD
+    FE[Angular frontend] --> API[FastAPI API]
+    API --> MEM[Validate conversation and resolve follow-up from bounded history]
+    PG --> MEM
+    MEM --> MODE{Configured execution mode}
+    MODE -->|legacy| LEGACY[Legacy RAG pipeline]
+    MODE -->|LangGraph| CLASSIFY[Deterministic task classification]
+    CLASSIFY -->|direct| DIRECT[Existing direct RAG path]
+    CLASSIFY -->|research / comparison / synthesis| PLAN[Bounded plan: up to 3 queries]
+    PLAN --> TASKS[Retrieve each planned query]
+    LEGACY --> CORE[Hybrid retrieval core]
+    DIRECT --> CORE
+    TASKS --> CORE
+    CORE --> SEM[Chroma semantic search]
+    CORE --> BM25[BM25 lexical search]
+    SEM <--> VDB[(Persistent ChromaDB)]
+    BM25 <--> VDB
+    SEM --> RRF[Reciprocal Rank Fusion]
+    BM25 --> RRF
+    RRF -->|legacy or direct| CONTEXT[Context assembly]
+    RRF -->|planned-query results| AGG[Deduplicate and associate current-request evidence]
+    AGG --> COVER[Retrieval coverage evaluation]
+    COVER -->|sufficient| CONTEXT[Context assembly]
+    COVER -->|missing aspects, once| ADJUST[Target missing aspects]
+    ADJUST --> TASKS
+    COVER -->|still insufficient| PARTIAL[Partial evidence or safe abstention]
+    PARTIAL --> CONTEXT
+    CONTEXT --> LLM[Optional configured LLM provider]
+    LLM --> VALIDATE[Citation and answer validation]
+    VALIDATE --> RESPONSE[Response construction]
+    RESPONSE --> API
+    API --> SAVE[Persist original question and response]
+    SAVE --> PG[(PostgreSQL documents and conversations)]
     API --> FE
+    INGEST[Upload and processing API] --> EXTRACT[PDF / DOCX / TXT / Markdown extraction]
+    EXTRACT --> CHUNK[Clean and split into chunks]
+    CHUNK --> EMBED[Sentence Transformers embeddings]
+    EMBED --> VDB
+    INGEST --> PG
 ```
+
+The diagram shows two execution modes: the legacy path and LangGraph. Only explicitly complex tasks enter planning, evidence aggregation, and coverage evaluation; direct tasks bypass those stages. Conversation history only helps resolve references before retrieval. The retrieval context and citations for each response come from document chunks retrieved for that request.
 
 ### Technology stack
 
-| Area | Technology | Role |
-| --- | --- | --- |
-| Web client | Angular 21, TypeScript, RxJS | Workspace, document management, search, and analysis experiences |
-| API | Python, FastAPI, Pydantic | REST endpoints, request validation, authentication boundaries, and service coordination |
-| Relational data | PostgreSQL, SQLAlchemy, Alembic | Users, workspaces, permissions, document metadata, processing state, and audit records |
-| Vector retrieval | ChromaDB | Embedding and metadata index for knowledge chunks |
-| RAG framework | LlamaIndex | Document indexing and retrieval building blocks |
-| Agent orchestration | LangGraph | Stateful, tool-using AI workflows |
-| Embeddings | Sentence Transformers | Local or configurable text embedding models |
-| Language models | Ollama or a configurable LLM API | Answer generation and analysis |
-| Packaging | Docker, Docker Compose | Repeatable local services and deployment packaging |
-| Quality | Pytest | Backend and service-level automated tests |
+| Area                   | Technology                             | Role                                                                |
+| ---------------------- | -------------------------------------- | ------------------------------------------------------------------- |
+| Web client             | Angular 21, TypeScript, RxJS           | Dashboard, knowledge base, chat, conversation history, and settings |
+| API                    | Python, FastAPI, Pydantic              | HTTP endpoints and request/response validation                      |
+| Relational persistence | PostgreSQL, SQLAlchemy 2, Alembic      | Document metadata, processing status, conversations, and messages   |
+| Vector retrieval       | ChromaDB                               | Persistent embeddings and chunk metadata                            |
+| Lexical retrieval      | BM25 implementation in the backend     | Keyword candidate ranking, fused with semantic retrieval using RRF  |
+| Embeddings             | Sentence Transformers                  | Local document/query embeddings; CPU is the default device          |
+| Workflow orchestration | LangGraph                              | Optional bounded RAG workflow selected by configuration             |
+| LLM providers          | Ollama or OpenAI-compatible HTTP API   | Optional grounded answer generation                                 |
+| File extraction        | PyMuPDF, python-docx                   | PDF and DOCX text extraction                                        |
+| Local service          | Docker Compose                         | PostgreSQL for development                                          |
+| Tests                  | Pytest and Node's built-in test runner | Backend and frontend regression checks                              |
 
-Model names, provider endpoints, and credentials are configuration, not source code. Remote model providers may incur charges; local Ollama can be used where supported.
+LlamaIndex is not currently a project dependency. The application does not implement independent LLM agents, a general-purpose agent tool system, or LangGraph checkpoint persistence.
 
-## Product capabilities
+## Request paths
 
-The product is designed to support these workflows. The current repository implements the platform foundation listed in [Current implementation](#current-implementation); the document, RAG, agent, and security workflows below describe intended capabilities and are not yet available as application features.
+### Direct RAG
 
-### Document ingestion and processing
+Simple questions use the existing retrieval path: query analysis, hybrid retrieval, RRF ranking, context selection, optional single-provider generation, response validation, and result construction. The LangGraph direct route bypasses task planning and evidence-coverage adjustment. Legacy mode remains available and is the default.
 
-Users will be able to add documents through the workspace, with the service validating file type and size, extracting text and structure, normalizing content, splitting it into traceable chunks, and recording processing state and errors. Each chunk will retain source metadata such as document identity and page or section location so retrieved information can be cited.
+### Research, comparison, and synthesis
 
-Processing will be designed for retries and duplicate detection. PostgreSQL will store document records and lifecycle metadata; ChromaDB will hold vector representations and retrieval metadata. The binary file storage provider and supported formats will be configured as the ingestion implementation is built.
+In LangGraph mode, explicit complex intent is classified deterministically. A bounded planner creates up to three focused retrieval queries; comparison queries retain subject association. Results are deduplicated by chunk ID and selected under one context budget. A deterministic coverage check can trigger one targeted adjustment round for missing aspects. The system then uses the existing generation, citation, and response-validation services. It does not make a planning or verification LLM call, and it makes at most one final generation call.
 
-### Semantic search and citation-based RAG
+### Evidence and limitations
 
-The RAG retrieval path combines semantic search over persistent ChromaDB embeddings with a local BM25 lexical pass over the indexed chunk text. Both candidate sets honor document ID filters and are fused using Reciprocal Rank Fusion, so entity and exact-term matches can complement semantic matches without comparing incompatible raw scores. The configured minimum relevance threshold still gates semantic candidates; lexical matches provide a separate evidence path. Context and citations are built from the retrieved chunks and their stored source metadata. Answer generation remains optional and uses only retrieved evidence when a provider is configured.
+Retrieved files are untrusted input. Prompts instruct the provider to ignore instructions embedded in documents and answer from retrieved evidence. Citation IDs are checked against chunks selected for the current request. Domain-specific checks cover cases such as polar technology questions and duration attribution; these are safeguards, not universal entailment verification. Provider configuration is optional, so retrieval can still return evidence without generated answers.
 
-### LangGraph agents and AI tools
+## API
 
-LangGraph will coordinate multi-step workflows such as comparing documents, summarizing a collection, extracting structured facts, and answering questions that require multiple retrieval steps. Agent tools will be explicit, typed, and permission-scoped; document search and analysis will operate only on content the requesting user can access. Tool activity and final source references will be available for review.
-
-### Authentication, authorization, and security
-
-The target platform will support authenticated users and workspace membership with role- and resource-based access checks. Authorization will be enforced by the API for document access, search filters, and agent tools, not only by the frontend. The identity provider and token strategy remain configurable implementation choices.
-
-Security controls will include secret-free source control, environment-based credentials, input and upload validation, least-privilege database access, protected operational endpoints, and auditable access and processing events. Production deployments should use TLS and managed encryption for data at rest and backups.
-
-### Evaluation, testing, and observability
-
-Pytest is used for backend tests. The current tests cover health and readiness behavior. As retrieval and generation capabilities are implemented, evaluation will include representative question sets, retrieval relevance, citation correctness, answer grounding, and regression checks across model or prompt changes.
-
-Operational observability is intended to cover structured application logs, request and processing status, latency and error metrics, model usage, and traceable agent/tool steps. Sensitive document content and credentials must not be written to logs by default.
-
-## Current implementation
-
-The repository currently contains a working foundation:
-
-- Angular 21 standalone application with a workspace overview and a live API health indicator.
-- FastAPI application with `GET /api/v1/health` and database-backed `GET /api/v1/ready` endpoints.
-- SQLAlchemy `KnowledgeDocument` model and an Alembic migration for its initial PostgreSQL schema.
-- Docker Compose PostgreSQL service and environment-based configuration.
-- Pytest coverage for API liveness and database readiness.
-
-Document upload, content processing, search, RAG answers, authentication, authorization, agent workflows, and production observability are not implemented yet. The frontend does not currently expose those workflows.
-
-## Data architecture
-
-PostgreSQL is the source of truth for structured application data: workspace membership, access policy, document identity and metadata, processing status, and audit events. Alembic migrations manage schema changes.
-
-ChromaDB is intended for vector search over document chunks. Each vector record will carry identifiers and filterable metadata that map back to its PostgreSQL document record. PostgreSQL and ChromaDB have different responsibilities: relational data governs identity and access, while the vector index helps locate relevant content. Search results must be checked against the current authorization rules before they are provided to a user or an agent.
-
-## API documentation
-
-When the FastAPI server is running, interactive OpenAPI documentation is available at:
+FastAPI publishes interactive documentation while running:
 
 - Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
 - ReDoc: [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- OpenAPI schema: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+- OpenAPI JSON: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
 
-The implemented API currently exposes only the health and readiness endpoints described above.
+Implemented endpoints include:
+
+- `GET /api/v1/health` and `GET /api/v1/ready`
+- `POST /api/v1/documents/upload` and `POST /api/v1/documents/upload/multiple`
+- `GET /api/v1/documents`, `GET /api/v1/documents/{document_id}`, `DELETE /api/v1/documents/{document_id}`, and `POST /api/v1/documents/{document_id}/reindex`
+- `POST /api/v1/chat/query` and `POST /api/v1/chat/retrieve`
+- `GET /api/v1/chat/conversations`, `GET /api/v1/chat/conversations/{conversation_id}`, and `DELETE /api/v1/chat/conversations/{conversation_id}`
+
+The query response contains the answer (when available), citations, retrieved chunks, provider/model metadata, generation status, retrieval metadata, and conversation ID. See the OpenAPI schema for exact field definitions.
 
 ## Local development
 
 ### Configure environment
 
-From the repository root in PowerShell, create local environment files from the examples if they do not already exist:
+From the repository root in PowerShell, create local environment files only if absent:
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 if (-not (Test-Path backend/.env)) { Copy-Item backend/.env.example backend/.env }
 ```
 
-Set the same local PostgreSQL password in both files. Keep `POSTGRES_DB`, `POSTGRES_USER`, and the password in `DATABASE_URL` aligned. URL-encode special characters in the password when placing it in `DATABASE_URL`. Never commit `.env` files.
+Set the same local PostgreSQL database, user, and password in both files. Align root `POSTGRES_PORT` with the port in `backend/.env`'s `DATABASE_URL`; URL-encode special characters in the URL password. Never commit `.env` files.
 
-On the current Windows machine, a local PostgreSQL service uses port 5432 and another container uses port 5433. The ignored local environment files use port **15432** for this project. Set `POSTGRES_PORT=15432` in the root `.env` and use port `15432` in `backend/.env`'s `DATABASE_URL`. On another machine, choose an available port and keep both settings aligned; the example files use the standard port 5432.
+On the documented Windows development machine, port 5432 is used by a local PostgreSQL service and port 5433 by another container. The ignored local environment files map this project to **15432**. Keep `POSTGRES_PORT=15432` and the backend `DATABASE_URL` port aligned. The example files use 5432 for other environments.
 
 ### Start PostgreSQL
 
-From the repository root:
+Docker Compose starts PostgreSQL only; the API and Angular development server run locally.
 
 ```powershell
 docker compose up -d postgres
@@ -131,11 +180,9 @@ docker compose ps
 docker compose logs --tail=50 postgres
 ```
 
-Wait for the PostgreSQL container to report healthy before running migrations.
-
 ### Install and run the backend
 
-From the repository root, create a virtual environment only if one is not already present, then install the project and development dependencies:
+From the repository root:
 
 ```powershell
 if (-not (Test-Path backend/.venv)) { python -m venv backend/.venv }
@@ -145,21 +192,23 @@ Set-Location backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-The API listens at `http://localhost:8000`. Verify liveness at `/api/v1/health` and database readiness at `/api/v1/ready`.
+The API listens at `http://localhost:8000`. Check `/api/v1/health` for liveness and `/api/v1/ready` for database readiness. Upload processing uses FastAPI background tasks in the current process; it is not a durable distributed queue.
 
-RAG execution uses the legacy `RAGPipeline.query()` path by default. To run the same chat and retrieval requests through the LangGraph workflow, set `RAG_EXECUTION_MODE=langgraph` in `backend/.env` and restart FastAPI. Supported values are `legacy` and `langgraph`; both return the existing API response shape. Switch back with `RAG_EXECUTION_MODE=legacy`.
+RAG runs in legacy mode by default. To select LangGraph, set `RAG_EXECUTION_MODE=langgraph` in `backend/.env` and restart the API. Supported values are `legacy` and `langgraph`.
+
+To enable local Ollama generation, configure `LLM_PROVIDER=ollama`, `LLM_MODEL`, and `OLLAMA_BASE_URL` in `backend/.env`. The application does not install Ollama or download models. For an OpenAI-compatible endpoint, configure its provider, model, base URL, and secret key using the matching variables in `backend/.env.example`. Do not put API credentials in frontend configuration.
 
 ### Run backend tests
 
-From the `backend/` directory:
+From `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-### Install and run the frontend
+### Run the frontend
 
-In a separate terminal, from the repository root:
+In a separate PowerShell terminal:
 
 ```powershell
 Set-Location frontend
@@ -167,28 +216,33 @@ npm.cmd install
 npm.cmd start
 ```
 
-The Angular development server runs at `http://localhost:4200`. `npm.cmd` works in PowerShell environments where execution policy blocks the `npm.ps1` shim. The frontend API base URL is configured in `frontend/src/environments/environment.ts`.
-
-To verify the production build, run `npm.cmd run build` from `frontend/`.
+The Angular development server runs at `http://localhost:4200`; its API base URL is in `src/environments/environment.ts`. Run the current Node-based frontend checks from `frontend/` with `node --experimental-strip-types --test "src/**/*.spec.ts"`, and run `npm.cmd run build` for the production build. The Angular CLI test target is not configured yet, so `npm.cmd test` cannot currently discover a test target. `npm.cmd` works where PowerShell's execution policy blocks the `npm.ps1` shim.
 
 ## Project structure
 
 ```text
 backend/
-  app/
-    api/                 FastAPI routers and routes
-    core/                Settings and shared application configuration
-    db/                  SQLAlchemy base, engine, and session dependency
-    models/              Relational data models
-  migrations/            Alembic environment and schema revisions
-  tests/                 Backend tests
-  pyproject.toml         Python package and dependency configuration
+  app/api/                 FastAPI routers and endpoints
+  app/core/                Settings and shared configuration
+  app/db/                  SQLAlchemy base, engine, and session dependency
+  app/models/              Document and conversation models
+  app/services/            Ingestion, storage, conversation memory, and RAG services
+  app/services/rag/        Retrieval pipeline, providers, graph, and graph state
+  migrations/              Alembic environment and schema revisions
+  tests/                   Backend unit and API tests
+  pyproject.toml           Python package and dependency configuration
 frontend/
-  src/
-    app/                 Angular application and workspace UI
-    environments/        Frontend environment configuration
-  angular.json           Angular build and serve configuration
-docker-compose.yml       Local PostgreSQL service
-.env.example             Local Docker Compose environment template
-README.md                Product, architecture, and development guide
+  src/app/                 Angular standalone application and pages
+  src/environments/        API base URL configuration
+docker-compose.yml         Local PostgreSQL service
+.env.example               Root Docker Compose environment template
+README.md                  Product, architecture, and development guide
+DEMO.md                    Suggested manual demo walkthrough
 ```
+
+## Security and known limitations
+
+- Authentication, user ownership, and document-level authorization are not implemented. Conversation IDs are not user-scoped; do not expose this deployment as a multi-user service without adding access control.
+- Scanned-document OCR, durable background job processing, and persistent graph checkpoints are not implemented.
+- Coverage evaluation measures retrieval association/coverage, not semantic entailment. Citations and answer checks reduce risk but cannot guarantee factual correctness.
+- Local uploads, ChromaDB files, model caches, and credentials belong in ignored runtime/environment files, not source control.
